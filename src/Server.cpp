@@ -50,28 +50,42 @@ int main(int argc, char **argv) {
   // You can use print statements as follows for debugging, they'll be visible when running tests.
   std::cout << "Logs from your program will appear here!\n";
 
-  // Uncomment this block to pass the first stage
-  // 
-  // accept(server_fd, (struct sockaddr *) &client_addr, (socklen_t *) &client_addr_len);
-  std::cout << "Client connected\n";
-
   int client_fd = accept(server_fd, (struct sockaddr *) &client_addr, (socklen_t *) &client_addr_len);
+  if (client_fd < 0) {
+    std::cerr << "Failed to accept client connection\n";
+    close(server_fd);
+    return 1;
+  }
   std::cout << "Client connected\n";
-  // if (client_fd < 0) {
-  //   std::cerr << "Failed to accept client connection\n";
-  //   return 1;
-  // }
 
-  // std::string response = "+PONG\r\n";
-  // if (send(client_fd, response.c_str(), response.size(), 0) < 0) {
-  //   std::cerr << "Failed to send response to client\n";
-  //   close(client_fd);
-  //   return 1;
-  // }
-  std::string response = "+PONG\r\n";
-  send(client_fd, response.c_str(), response.size(), 0);
+  char buffer[1024] = {0};
+  while (true) {
+    int bytes_read = read(client_fd, buffer, sizeof(buffer));
+    if (bytes_read < 0) {
+      std::cerr << "failed to read\n";
+      close(client_fd);
+      close(server_fd);
+      return 1;
+    }
+    if (bytes_read == 0) {
+      // Client closed connection
+      break;
+    }
+    std::string request(buffer, bytes_read);
+    if (request.find("PING") != std::string::npos) {
+      std::string respond("+PONG\r\n");
+      if (write(client_fd, respond.c_str(), respond.size()) < 0) {
+        std::cerr << "Failed to send response to client\n";
+        close(client_fd);
+        close(server_fd);
+        return 1;
+      }
+    }
+    // Clear buffer for next read
+    memset(buffer, 0, sizeof(buffer));
+  }
+
   close(client_fd);
   close(server_fd);
-
   return 0;
 }
