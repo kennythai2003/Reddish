@@ -66,6 +66,28 @@ int main(int argc, char **argv) {
   std::cout << "Server event loop started. Waiting for clients...\n";
 
   while (true) {
+    // Helper: Parse RESP array into vector<string>
+    auto parse_resp_array = [](const std::string& req) -> std::vector<std::string> {
+      std::vector<std::string> out;
+      size_t pos = 0;
+      // Find first '*', skip array header
+      if (req[pos] == '*') {
+        size_t rn = req.find("\r\n", pos);
+        if (rn == std::string::npos) return out;
+        pos = rn + 2;
+      }
+      while (pos < req.size()) {
+        if (req[pos] != '$') break;
+        size_t len_end = req.find("\r\n", pos);
+        if (len_end == std::string::npos) break;
+        int len = std::stoi(req.substr(pos + 1, len_end - pos - 1));
+        size_t val_start = len_end + 2;
+        if (val_start + len > req.size()) break;
+        out.push_back(req.substr(val_start, len));
+        pos = val_start + len + 2; // skip value and trailing \r\n
+      }
+      return out;
+    };
     read_fds = master_set;
     int activity = select(fd_max + 1, &read_fds, NULL, NULL, NULL);
     if (activity < 0) {
@@ -137,6 +159,37 @@ int main(int argc, char **argv) {
                       FD_CLR(fd, &master_set);
                     }
                   }
+                }
+              }
+            }
+            // Handle SET (with optional PX expiry)
+            else if (request.find("SET") != std::string::npos) {
+              std::vector<std::string> args = parse_resp_array(request);
+              if (args.size() == 3 && args[0] == "SET") {
+                // SET key value
+                kv_store[args[1]] = args[2];
+                expiry_store.erase(args[1]);
+                std::string response = "+OK\r\n";
+                if (write(fd, response.c_str(), response.size()) < 0) {
+                  std::cerr << "Failed to send response to client fd=" << fd << "\n";
+                  close(fd);
+                  FD_CLR(fd, &master_set);
+                }
+              } else if (args.size() == 5 && args[0] == "SET") {
+                // SET key value PX ms
+                kv_store[args[1]] = args[2];
+                expiry_store.erase(args[1]);
+                std::string px_arg = args[3];
+                std::transform(px_arg.begin(), px_arg.end(), px_arg.begin(), ::tolower);
+                if (px_arg == "px") {
+                  int ms_val = std::stoi(args[4]);
+                  expiry_store[args[1]] = std::chrono::steady_clock::now() + std::chrono::milliseconds(ms_val);
+                }
+                std::string response = "+OK\r\n";
+                if (write(fd, response.c_str(), response.size()) < 0) {
+                  std::cerr << "Failed to send response to client fd=" << fd << "\n";
+                  close(fd);
+                  FD_CLR(fd, &master_set);
                 }
               }
             }
