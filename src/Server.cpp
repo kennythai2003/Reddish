@@ -8,9 +8,13 @@
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <unordered_map>
+#include <chrono>
+#include <algorithm>
 
 int main(int argc, char **argv) {
   std::unordered_map<std::string, std::string> kv_store;
+  // Store expiry as milliseconds since epoch
+  std::unordered_map<std::string, std::chrono::steady_clock::time_point> expiry_store;
   // Flush after every std::cout / std::cerr
   std::cout << std::unitbuf;
   std::cerr << std::unitbuf;
@@ -125,9 +129,9 @@ int main(int argc, char **argv) {
                 }
               }
             }
-            // Handle SET
+            // Handle SET (with optional PX expiry)
             else if (request.find("SET") != std::string::npos) {
-              // Parse RESP array: *3\r\n$3\r\nSET\r\n$<klen>\r\n<key>\r\n$<vlen>\r\n<val>\r\n
+              // Parse RESP array: *N\r\n$3\r\nSET\r\n$<klen>\r\n<key>\r\n$<vlen>\r\n<val>\r\n[optional PX]
               // Find SET
               size_t set_pos = request.find("SET");
               size_t key_dollar = request.find('$', set_pos);
@@ -146,6 +150,37 @@ int main(int argc, char **argv) {
                       size_t val_start = val_len_end + 2;
                       std::string val = request.substr(val_start, val_len);
                       kv_store[key] = val;
+                      // Remove any previous expiry
+                      expiry_store.erase(key);
+                      // Check for PX argument (case-insensitive)
+                      // Look for next $ after value
+                      size_t px_dollar = request.find('$', val_start + val_len);
+                      if (px_dollar != std::string::npos) {
+                        size_t px_len_end = request.find("\r\n", px_dollar);
+                        if (px_len_end != std::string::npos) {
+                          int px_len = std::stoi(request.substr(px_dollar + 1, px_len_end - px_dollar - 1));
+                          size_t px_start = px_len_end + 2;
+                          std::string px_arg = request.substr(px_start, px_len);
+                          // Case-insensitive compare for PX
+                          std::string px_arg_lower = px_arg;
+                          std::transform(px_arg_lower.begin(), px_arg_lower.end(), px_arg_lower.begin(), ::tolower);
+                          if (px_arg_lower == "px") {
+                            // Next $ is the expiry value
+                            size_t ms_dollar = request.find('$', px_start + px_len);
+                            if (ms_dollar != std::string::npos) {
+                              size_t ms_len_end = request.find("\r\n", ms_dollar);
+                              if (ms_len_end != std::string::npos) {
+                                int ms_len = std::stoi(request.substr(ms_dollar + 1, ms_len_end - ms_dollar - 1));
+                                size_t ms_start = ms_len_end + 2;
+                                std::string ms_val_str = request.substr(ms_start, ms_len);
+                                int ms_val = std::stoi(ms_val_str);
+                                // Set expiry time for key
+                                expiry_store[key] = std::chrono::steady_clock::now() + std::chrono::milliseconds(ms_val);
+                              }
+                            }
+                          }
+                        }
+                      }
                       std::string response = "+OK\r\n";
                       if (write(fd, response.c_str(), response.size()) < 0) {
                         std::cerr << "Failed to send response to client fd=" << fd << "\n";
@@ -157,7 +192,7 @@ int main(int argc, char **argv) {
                 }
               }
             }
-            // Handle GET
+            // Handle GET (check expiry)
             else if (request.find("GET") != std::string::npos) {
               // Parse RESP array: *2\r\n$3\r\nGET\r\n$<klen>\r\n<key>\r\n
               size_t get_pos = request.find("GET");
@@ -170,7 +205,17 @@ int main(int argc, char **argv) {
                   std::string key = request.substr(key_start, key_len);
                   auto it = kv_store.find(key);
                   std::string response;
-                  if (it != kv_store.end()) {
+                  bool expired = false;
+                  auto exp_it = expiry_store.find(key);
+                  if (exp_it != expiry_store.end()) {
+                    if (std::chrono::steady_clock::now() >= exp_it->second) {
+                      // Key expired, remove from both stores
+                      kv_store.erase(key);
+                      expiry_store.erase(key);
+                      expired = true;
+                    }
+                  }
+                  if (it != kv_store.end() && !expired) {
                     response = "$" + std::to_string(it->second.length()) + "\r\n" + it->second + "\r\n";
                   } else {
                     response = "$-1\r\n"; // Null bulk string
