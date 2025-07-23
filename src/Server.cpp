@@ -15,6 +15,8 @@ int main(int argc, char **argv) {
   std::unordered_map<std::string, std::string> kv_store;
   // Store expiry as milliseconds since epoch
   std::unordered_map<std::string, std::chrono::steady_clock::time_point> expiry_store;
+  // Store lists for RPUSH
+  std::unordered_map<std::string, std::vector<std::string>> list_store;
   // Flush after every std::cout / std::cerr
   std::cout << std::unitbuf;
   std::cerr << std::unitbuf;
@@ -64,6 +66,48 @@ int main(int argc, char **argv) {
   std::cout << "Server event loop started. Waiting for clients...\n";
 
   while (true) {
+            // Handle RPUSH (create new list with single element)
+            else if (request.find("RPUSH") != std::string::npos) {
+              // Parse RESP array: *3\r\n$5\r\nRPUSH\r\n$<klen>\r\n<key>\r\n$<elen>\r\n<element>\r\n
+              size_t rpush_pos = request.find("RPUSH");
+              size_t key_dollar = request.find('$', rpush_pos);
+              if (key_dollar != std::string::npos) {
+                size_t key_len_end = request.find("\r\n", key_dollar);
+                if (key_len_end != std::string::npos) {
+                  int key_len = std::stoi(request.substr(key_dollar + 1, key_len_end - key_dollar - 1));
+                  size_t key_start = key_len_end + 2;
+                  std::string key = request.substr(key_start, key_len);
+                  // Find element
+                  size_t elem_dollar = request.find('$', key_start + key_len);
+                  if (elem_dollar != std::string::npos) {
+                    size_t elem_len_end = request.find("\r\n", elem_dollar);
+                    if (elem_len_end != std::string::npos) {
+                      int elem_len = std::stoi(request.substr(elem_dollar + 1, elem_len_end - elem_dollar - 1));
+                      size_t elem_start = elem_len_end + 2;
+                      std::string elem = request.substr(elem_start, elem_len);
+                      // Only create new list if it doesn't exist
+                      if (list_store.find(key) == list_store.end()) {
+                        list_store[key] = std::vector<std::string>{elem};
+                        std::string response = ":1\r\n";
+                        if (write(fd, response.c_str(), response.size()) < 0) {
+                          std::cerr << "Failed to send response to client fd=" << fd << "\n";
+                          close(fd);
+                          FD_CLR(fd, &master_set);
+                        }
+                      } else {
+                        // For now, do nothing for existing lists (future stages)
+                        std::string response = ":" + std::to_string(list_store[key].size()) + "\r\n";
+                        if (write(fd, response.c_str(), response.size()) < 0) {
+                          std::cerr << "Failed to send response to client fd=" << fd << "\n";
+                          close(fd);
+                          FD_CLR(fd, &master_set);
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
     read_fds = master_set;
     int activity = select(fd_max + 1, &read_fds, NULL, NULL, NULL);
     if (activity < 0) {

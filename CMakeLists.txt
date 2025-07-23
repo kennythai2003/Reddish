@@ -1,3 +1,9 @@
+
+# Set vcpkg toolchain file if not already set
+if(NOT DEFINED CMAKE_TOOLCHAIN_FILE)
+  set(CMAKE_TOOLCHAIN_FILE "$ENV{HOME}/vcpkg/scripts/buildsystems/vcpkg.cmake" CACHE STRING "")
+endif()
+
 cmake_minimum_required(VERSION 3.13)
 
 project(redis-starter-cpp)
