@@ -88,12 +88,39 @@ int main(int argc, char **argv) {
             FD_CLR(fd, &master_set);
           } else {
             std::string request(buffer, bytes_read);
+            // Handle PING
             if (request.find("PING") != std::string::npos) {
               std::string respond("+PONG\r\n");
               if (write(fd, respond.c_str(), respond.size()) < 0) {
                 std::cerr << "Failed to send response to client fd=" << fd << "\n";
                 close(fd);
                 FD_CLR(fd, &master_set);
+              }
+            }
+            // Handle ECHO
+            else if (request.find("ECHO") != std::string::npos) {
+              // Parse RESP array: *2\r\n$4\r\nECHO\r\n$<len>\r\n<arg>\r\n
+              // Find the position of the argument
+              size_t echo_pos = request.find("ECHO");
+              size_t arg_start = request.find("\r\n", echo_pos);
+              if (arg_start != std::string::npos) {
+                // Find next $ (start of argument bulk string)
+                size_t dollar_pos = request.find('$', arg_start);
+                if (dollar_pos != std::string::npos) {
+                  size_t len_end = request.find("\r\n", dollar_pos);
+                  if (len_end != std::string::npos) {
+                    int arg_len = std::stoi(request.substr(dollar_pos + 1, len_end - dollar_pos - 1));
+                    size_t arg_val_start = len_end + 2;
+                    std::string arg = request.substr(arg_val_start, arg_len);
+                    // RESP bulk string: $<len>\r\n<arg>\r\n
+                    std::string response = "$" + std::to_string(arg.length()) + "\r\n" + arg + "\r\n";
+                    if (write(fd, response.c_str(), response.size()) < 0) {
+                      std::cerr << "Failed to send response to client fd=" << fd << "\n";
+                      close(fd);
+                      FD_CLR(fd, &master_set);
+                    }
+                  }
+                }
               }
             }
           }
