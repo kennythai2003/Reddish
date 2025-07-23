@@ -163,6 +163,35 @@ int main(int argc, char **argv) {
               }
             }
             // Handle SET (with optional PX expiry)
+            // Handle GET (with expiry check)
+            else if (request.find("GET") != std::string::npos) {
+              std::vector<std::string> args = parse_resp_array(request);
+              if (args.size() == 2 && args[0] == "GET") {
+                std::string key = args[1];
+                auto it = kv_store.find(key);
+                std::string response;
+                bool expired = false;
+                auto exp_it = expiry_store.find(key);
+                if (exp_it != expiry_store.end()) {
+                  if (std::chrono::steady_clock::now() >= exp_it->second) {
+                    // Key expired, remove from both stores
+                    kv_store.erase(key);
+                    expiry_store.erase(key);
+                    expired = true;
+                  }
+                }
+                if (it != kv_store.end() && !expired) {
+                  response = "$" + std::to_string(it->second.length()) + "\r\n" + it->second + "\r\n";
+                } else {
+                  response = "$-1\r\n"; // Null bulk string
+                }
+                if (write(fd, response.c_str(), response.size()) < 0) {
+                  std::cerr << "Failed to send response to client fd=" << fd << "\n";
+                  close(fd);
+                  FD_CLR(fd, &master_set);
+                }
+              }
+            }
             else if (request.find("SET") != std::string::npos) {
               std::vector<std::string> args = parse_resp_array(request);
               if (args.size() == 3 && args[0] == "SET") {
