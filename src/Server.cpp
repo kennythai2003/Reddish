@@ -10,6 +10,8 @@
 #include <unordered_map>
 #include <chrono>
 #include <algorithm>
+#include "RespParser.h"
+#include "CommandHandler.h"
 
 int main(int argc, char **argv) {
   std::unordered_map<std::string, std::string> kv_store;
@@ -66,28 +68,7 @@ int main(int argc, char **argv) {
   std::cout << "Server event loop started. Waiting for clients...\n";
 
   while (true) {
-    // Helper: Parse RESP array into vector<string>
-    auto parse_resp_array = [](const std::string& req) -> std::vector<std::string> {
-      std::vector<std::string> out;
-      size_t pos = 0;
-      // Find first '*', skip array header
-      if (req[pos] == '*') {
-        size_t rn = req.find("\r\n", pos);
-        if (rn == std::string::npos) return out;
-        pos = rn + 2;
-      }
-      while (pos < req.size()) {
-        if (req[pos] != '$') break;
-        size_t len_end = req.find("\r\n", pos);
-        if (len_end == std::string::npos) break;
-        int len = std::stoi(req.substr(pos + 1, len_end - pos - 1));
-        size_t val_start = len_end + 2;
-        if (val_start + len > req.size()) break;
-        out.push_back(req.substr(val_start, len));
-        pos = val_start + len + 2; // skip value and trailing \r\n
-      }
-      return out;
-    };
+    CommandHandler handler(kv_store, expiry_store, list_store);
     read_fds = master_set;
     int activity = select(fd_max + 1, &read_fds, NULL, NULL, NULL);
     if (activity < 0) {
@@ -118,134 +99,13 @@ int main(int argc, char **argv) {
             FD_CLR(fd, &master_set);
           } else {
             std::string request(buffer, bytes_read);
-            // Handle PING
-            {
-              std::vector<std::string> args = parse_resp_array(request);
-              if (args.size() == 1 && args[0] == "PING") {
-                std::string response = "+PONG\r\n";
-                if (write(fd, response.c_str(), response.size()) < 0) {
-                  std::cerr << "Failed to send response to client fd=" << fd << "\n";
-                  close(fd);
-                  FD_CLR(fd, &master_set);
-                }
-                continue;
-              }
-            }
-            // Handle RPUSH (create new list with single element)
-            // Handle ECHO
-            if (request.find("ECHO") != std::string::npos) {
-              std::vector<std::string> args = parse_resp_array(request);
-              if (args.size() == 2 && args[0] == "ECHO") {
-                std::string arg = args[1];
-                std::string response = "$" + std::to_string(arg.length()) + "\r\n" + arg + "\r\n";
-                if (write(fd, response.c_str(), response.size()) < 0) {
-                  std::cerr << "Failed to send response to client fd=" << fd << "\n";
-                  close(fd);
-                  FD_CLR(fd, &master_set);
-                }
-              }
-            }
-            if (request.find("RPUSH") != std::string::npos) {
-              // Parse RESP array for RPUSH: *N\r\n$5\r\nRPUSH\r\n$<klen>\r\n<key>\r\n$<elen1>\r\n<elem1>\r\n[$<elen2>\r\n<elem2>\r\n ...]
-              size_t rpush_pos = request.find("RPUSH");
-              // Find the first $ after RPUSH (key)
-              size_t key_dollar = request.find('$', rpush_pos);
-              if (key_dollar != std::string::npos) {
-                size_t key_len_end = request.find("\r\n", key_dollar);
-                if (key_len_end != std::string::npos) {
-                  int key_len = std::stoi(request.substr(key_dollar + 1, key_len_end - key_dollar - 1));
-                  size_t key_start = key_len_end + 2;
-                  std::string key = request.substr(key_start, key_len);
-                  size_t cursor = key_start + key_len;
-                  std::vector<std::string> elements;
-                  // Parse all elements after the key
-                  while (true) {
-                    size_t elem_dollar = request.find('$', cursor);
-                    if (elem_dollar == std::string::npos) break;
-                    size_t elem_len_end = request.find("\r\n", elem_dollar);
-                    if (elem_len_end == std::string::npos) break;
-                    int elem_len = std::stoi(request.substr(elem_dollar + 1, elem_len_end - elem_dollar - 1));
-                    size_t elem_start = elem_len_end + 2;
-                    if (elem_start + elem_len > request.size()) break;
-                    std::string elem = request.substr(elem_start, elem_len);
-                    elements.push_back(elem);
-                    cursor = elem_start + elem_len;
-                  }
-                  // Insert elements into the list
-                  if (elements.size() > 0) {
-                    if (list_store.find(key) == list_store.end()) {
-                      list_store[key] = elements;
-                    } else {
-                      list_store[key].insert(list_store[key].end(), elements.begin(), elements.end());
-                    }
-                    std::string response = ":" + std::to_string(list_store[key].size()) + "\r\n";
-                    if (write(fd, response.c_str(), response.size()) < 0) {
-                      std::cerr << "Failed to send response to client fd=" << fd << "\n";
-                      close(fd);
-                      FD_CLR(fd, &master_set);
-                    }
-                  }
-                }
-              }
-            }
-            // Handle SET (with optional PX expiry)
-            // Handle GET (with expiry check)
-            else if (request.find("GET") != std::string::npos) {
-              std::vector<std::string> args = parse_resp_array(request);
-              if (args.size() == 2 && args[0] == "GET") {
-                std::string key = args[1];
-                auto it = kv_store.find(key);
-                std::string response;
-                bool expired = false;
-                auto exp_it = expiry_store.find(key);
-                if (exp_it != expiry_store.end()) {
-                  if (std::chrono::steady_clock::now() >= exp_it->second) {
-                    // Key expired, remove from both stores
-                    kv_store.erase(key);
-                    expiry_store.erase(key);
-                    expired = true;
-                  }
-                }
-                if (it != kv_store.end() && !expired) {
-                  response = "$" + std::to_string(it->second.length()) + "\r\n" + it->second + "\r\n";
-                } else {
-                  response = "$-1\r\n"; // Null bulk string
-                }
-                if (write(fd, response.c_str(), response.size()) < 0) {
-                  std::cerr << "Failed to send response to client fd=" << fd << "\n";
-                  close(fd);
-                  FD_CLR(fd, &master_set);
-                }
-              }
-            }
-            else if (request.find("SET") != std::string::npos) {
-              std::vector<std::string> args = parse_resp_array(request);
-              if (args.size() == 3 && args[0] == "SET") {
-                // SET key value
-                kv_store[args[1]] = args[2];
-                expiry_store.erase(args[1]);
-                std::string response = "+OK\r\n";
-                if (write(fd, response.c_str(), response.size()) < 0) {
-                  std::cerr << "Failed to send response to client fd=" << fd << "\n";
-                  close(fd);
-                  FD_CLR(fd, &master_set);
-                }
-              } else if (args.size() == 5 && args[0] == "SET") {
-                // SET key value PX ms
-                kv_store[args[1]] = args[2];
-                expiry_store.erase(args[1]);
-                std::string px_arg = args[3];
-                std::transform(px_arg.begin(), px_arg.end(), px_arg.begin(), ::tolower);
-                if (px_arg == "px") {
-                  int ms_val = std::stoi(args[4]);
-                  expiry_store[args[1]] = std::chrono::steady_clock::now() + std::chrono::milliseconds(ms_val);
-                }
-                std::string response = "+OK\r\n";
-                if (write(fd, response.c_str(), response.size()) < 0) {
-                  std::cerr << "Failed to send response to client fd=" << fd << "\n";
-                  close(fd);
-                  FD_CLR(fd, &master_set);
-                }
+            std::vector<std::string> args = RespParser::parseArray(request);
+            std::string response = handler.handle(args);
+            if (!response.empty()) {
+              if (write(fd, response.c_str(), response.size()) < 0) {
+                std::cerr << "Failed to send response to client fd=" << fd << "\n";
+                close(fd);
+                FD_CLR(fd, &master_set);
               }
             }
           }
