@@ -50,42 +50,61 @@ int main(int argc, char **argv) {
   // You can use print statements as follows for debugging, they'll be visible when running tests.
   std::cout << "Logs from your program will appear here!\n";
 
-  int client_fd = accept(server_fd, (struct sockaddr *) &client_addr, (socklen_t *) &client_addr_len);
-  if (client_fd < 0) {
-    std::cerr << "Failed to accept client connection\n";
-    close(server_fd);
-    return 1;
-  }
-  std::cout << "Client connected\n";
+  fd_set master_set, read_fds;
+  int fd_max = server_fd;
+  FD_ZERO(&master_set);
+  FD_SET(server_fd, &master_set);
 
-  char buffer[1024] = {0};
+  std::cout << "Server event loop started. Waiting for clients...\n";
+
   while (true) {
-    int bytes_read = read(client_fd, buffer, sizeof(buffer));
-    if (bytes_read < 0) {
-      std::cerr << "failed to read\n";
-      close(client_fd);
-      close(server_fd);
-      return 1;
-    }
-    if (bytes_read == 0) {
-      // Client closed connection
+    read_fds = master_set;
+    int activity = select(fd_max + 1, &read_fds, NULL, NULL, NULL);
+    if (activity < 0) {
+      std::cerr << "select() failed\n";
       break;
     }
-    std::string request(buffer, bytes_read);
-    if (request.find("PING") != std::string::npos) {
-      std::string respond("+PONG\r\n");
-      if (write(client_fd, respond.c_str(), respond.size()) < 0) {
-        std::cerr << "Failed to send response to client\n";
-        close(client_fd);
-        close(server_fd);
-        return 1;
+
+    for (int fd = 0; fd <= fd_max; ++fd) {
+      if (FD_ISSET(fd, &read_fds)) {
+        if (fd == server_fd) {
+          // New client connection
+          int new_client_fd = accept(server_fd, (struct sockaddr *)&client_addr, (socklen_t *)&client_addr_len);
+          if (new_client_fd < 0) {
+            std::cerr << "Failed to accept client connection\n";
+            continue;
+          }
+          FD_SET(new_client_fd, &master_set);
+          if (new_client_fd > fd_max) fd_max = new_client_fd;
+          std::cout << "Client connected: fd=" << new_client_fd << "\n";
+        } else {
+          // Data from existing client
+          char buffer[1024] = {0};
+          int bytes_read = read(fd, buffer, sizeof(buffer));
+          if (bytes_read <= 0) {
+            if (bytes_read < 0) std::cerr << "failed to read from client fd=" << fd << "\n";
+            else std::cout << "Client disconnected: fd=" << fd << "\n";
+            close(fd);
+            FD_CLR(fd, &master_set);
+          } else {
+            std::string request(buffer, bytes_read);
+            if (request.find("PING") != std::string::npos) {
+              std::string respond("+PONG\r\n");
+              if (write(fd, respond.c_str(), respond.size()) < 0) {
+                std::cerr << "Failed to send response to client fd=" << fd << "\n";
+                close(fd);
+                FD_CLR(fd, &master_set);
+              }
+            }
+          }
+        }
       }
     }
-    // Clear buffer for next read
-    memset(buffer, 0, sizeof(buffer));
   }
 
-  close(client_fd);
-  close(server_fd);
+  // Cleanup: close all fds
+  for (int fd = 0; fd <= fd_max; ++fd) {
+    if (FD_ISSET(fd, &master_set)) close(fd);
+  }
   return 0;
 }
