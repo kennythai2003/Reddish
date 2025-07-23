@@ -7,8 +7,10 @@
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #include <netdb.h>
+#include <unordered_map>
 
 int main(int argc, char **argv) {
+  std::unordered_map<std::string, std::string> kv_store;
   // Flush after every std::cout / std::cerr
   std::cout << std::unitbuf;
   std::cerr << std::unitbuf;
@@ -119,6 +121,64 @@ int main(int argc, char **argv) {
                       close(fd);
                       FD_CLR(fd, &master_set);
                     }
+                  }
+                }
+              }
+            }
+            // Handle SET
+            else if (request.find("SET") != std::string::npos) {
+              // Parse RESP array: *3\r\n$3\r\nSET\r\n$<klen>\r\n<key>\r\n$<vlen>\r\n<val>\r\n
+              // Find SET
+              size_t set_pos = request.find("SET");
+              size_t key_dollar = request.find('$', set_pos);
+              if (key_dollar != std::string::npos) {
+                size_t key_len_end = request.find("\r\n", key_dollar);
+                if (key_len_end != std::string::npos) {
+                  int key_len = std::stoi(request.substr(key_dollar + 1, key_len_end - key_dollar - 1));
+                  size_t key_start = key_len_end + 2;
+                  std::string key = request.substr(key_start, key_len);
+                  // Find value
+                  size_t val_dollar = request.find('$', key_start + key_len);
+                  if (val_dollar != std::string::npos) {
+                    size_t val_len_end = request.find("\r\n", val_dollar);
+                    if (val_len_end != std::string::npos) {
+                      int val_len = std::stoi(request.substr(val_dollar + 1, val_len_end - val_dollar - 1));
+                      size_t val_start = val_len_end + 2;
+                      std::string val = request.substr(val_start, val_len);
+                      kv_store[key] = val;
+                      std::string response = "+OK\r\n";
+                      if (write(fd, response.c_str(), response.size()) < 0) {
+                        std::cerr << "Failed to send response to client fd=" << fd << "\n";
+                        close(fd);
+                        FD_CLR(fd, &master_set);
+                      }
+                    }
+                  }
+                }
+              }
+            }
+            // Handle GET
+            else if (request.find("GET") != std::string::npos) {
+              // Parse RESP array: *2\r\n$3\r\nGET\r\n$<klen>\r\n<key>\r\n
+              size_t get_pos = request.find("GET");
+              size_t key_dollar = request.find('$', get_pos);
+              if (key_dollar != std::string::npos) {
+                size_t key_len_end = request.find("\r\n", key_dollar);
+                if (key_len_end != std::string::npos) {
+                  int key_len = std::stoi(request.substr(key_dollar + 1, key_len_end - key_dollar - 1));
+                  size_t key_start = key_len_end + 2;
+                  std::string key = request.substr(key_start, key_len);
+                  auto it = kv_store.find(key);
+                  std::string response;
+                  if (it != kv_store.end()) {
+                    response = "$" + std::to_string(it->second.length()) + "\r\n" + it->second + "\r\n";
+                  } else {
+                    response = "$-1\r\n"; // Null bulk string
+                  }
+                  if (write(fd, response.c_str(), response.size()) < 0) {
+                    std::cerr << "Failed to send response to client fd=" << fd << "\n";
+                    close(fd);
+                    FD_CLR(fd, &master_set);
                   }
                 }
               }
