@@ -66,8 +66,38 @@ int main(int argc, char **argv) {
   std::cout << "Server event loop started. Waiting for clients...\n";
 
   while (true) {
+    read_fds = master_set;
+    int activity = select(fd_max + 1, &read_fds, NULL, NULL, NULL);
+    if (activity < 0) {
+      std::cerr << "select() failed\n";
+      break;
+    }
+
+    for (int fd = 0; fd <= fd_max; ++fd) {
+      if (FD_ISSET(fd, &read_fds)) {
+        if (fd == server_fd) {
+          // New client connection
+          int new_client_fd = accept(server_fd, (struct sockaddr *)&client_addr, (socklen_t *)&client_addr_len);
+          if (new_client_fd < 0) {
+            std::cerr << "Failed to accept client connection\n";
+            continue;
+          }
+          FD_SET(new_client_fd, &master_set);
+          if (new_client_fd > fd_max) fd_max = new_client_fd;
+          std::cout << "Client connected: fd=" << new_client_fd << "\n";
+        } else {
+          // Data from existing client
+          char buffer[1024] = {0};
+          int bytes_read = read(fd, buffer, sizeof(buffer));
+          if (bytes_read <= 0) {
+            if (bytes_read < 0) std::cerr << "failed to read from client fd=" << fd << "\n";
+            else std::cout << "Client disconnected: fd=" << fd << "\n";
+            close(fd);
+            FD_CLR(fd, &master_set);
+          } else {
+            std::string request(buffer, bytes_read);
             // Handle RPUSH (create new list with single element)
-            else if (request.find("RPUSH") != std::string::npos) {
+            if (request.find("RPUSH") != std::string::npos) {
               // Parse RESP array: *3\r\n$5\r\nRPUSH\r\n$<klen>\r\n<key>\r\n$<elen>\r\n<element>\r\n
               size_t rpush_pos = request.find("RPUSH");
               size_t key_dollar = request.find('$', rpush_pos);
@@ -283,4 +313,4 @@ int main(int argc, char **argv) {
     if (FD_ISSET(fd, &master_set)) close(fd);
   }
   return 0;
-}
+
