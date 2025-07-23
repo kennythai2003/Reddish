@@ -118,6 +118,19 @@ int main(int argc, char **argv) {
             FD_CLR(fd, &master_set);
           } else {
             std::string request(buffer, bytes_read);
+            // Handle PING
+            {
+              std::vector<std::string> args = parse_resp_array(request);
+              if (args.size() == 1 && args[0] == "PING") {
+                std::string response = "+PONG\r\n";
+                if (write(fd, response.c_str(), response.size()) < 0) {
+                  std::cerr << "Failed to send response to client fd=" << fd << "\n";
+                  close(fd);
+                  FD_CLR(fd, &master_set);
+                }
+                continue;
+              }
+            }
             // Handle RPUSH (create new list with single element)
             // Handle ECHO
             if (request.find("ECHO") != std::string::npos) {
