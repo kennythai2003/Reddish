@@ -119,6 +119,19 @@ int main(int argc, char **argv) {
           } else {
             std::string request(buffer, bytes_read);
             // Handle RPUSH (create new list with single element)
+            // Handle ECHO
+            if (request.find("ECHO") != std::string::npos) {
+              std::vector<std::string> args = parse_resp_array(request);
+              if (args.size() == 2 && args[0] == "ECHO") {
+                std::string arg = args[1];
+                std::string response = "$" + std::to_string(arg.length()) + "\r\n" + arg + "\r\n";
+                if (write(fd, response.c_str(), response.size()) < 0) {
+                  std::cerr << "Failed to send response to client fd=" << fd << "\n";
+                  close(fd);
+                  FD_CLR(fd, &master_set);
+                }
+              }
+            }
             if (request.find("RPUSH") != std::string::npos) {
               // Parse RESP array for RPUSH: *N\r\n$5\r\nRPUSH\r\n$<klen>\r\n<key>\r\n$<elen1>\r\n<elem1>\r\n[$<elen2>\r\n<elem2>\r\n ...]
               size_t rpush_pos = request.find("RPUSH");
