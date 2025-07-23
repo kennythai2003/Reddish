@@ -131,8 +131,7 @@ int main(int argc, char **argv) {
                           std::cerr << "Failed to send response to client fd=" << fd << "\n";
                           close(fd);
                           FD_CLR(fd, &master_set);
-                        }
-                      }
+  }
                     }
                   }
                 }
@@ -148,13 +147,6 @@ int main(int argc, char **argv) {
     if (FD_ISSET(fd, &master_set)) close(fd);
   }
   return 0;
-}
     }
   }
-
   // Cleanup: close all fds
-  for (int fd = 0; fd <= fd_max; ++fd) {
-    if (FD_ISSET(fd, &master_set)) close(fd);
-  }
-  return 0;
-}
