@@ -145,7 +145,7 @@ std::string CommandHandler::handle(const std::vector<std::string>& args) {
             resp += "$" + std::to_string(list[i].size()) + "\r\n" + list[i] + "\r\n";
         }
         return resp;
-    } else if (cmd == "XADD" && args.size() >= 4 && args.size() % 2 == 0) {
+    } else if (cmd == "XADD" && args.size() >= 5 && (args.size() - 3) % 2 == 0) {
         std::string stream_key = args[1];
         std::string entry_id = args[2];
         StreamEntry entry;
