@@ -270,7 +270,7 @@ int main(int argc, char **argv) {
               if (cmd_upper == "XREAD" && args[1] == "block") {
                 double timeout = 0;
                 try { timeout = std::stod(args[2]) / 1000.0; } catch (...) { timeout = 0; } // Convert ms to seconds
-                
+
                 if (args[3] != "streams") {
                   std::string response = "-ERR syntax error\r\n";
                   if (write(fd, response.c_str(), response.size()) < 0) {
@@ -280,7 +280,7 @@ int main(int argc, char **argv) {
                   }
                   continue;
                 }
-                
+
                 // Parse streams and IDs
                 int n_streams = (args.size() - 4) / 2;
                 if ((args.size() - 4) % 2 != 0 || n_streams < 1) {
@@ -292,7 +292,7 @@ int main(int argc, char **argv) {
                   }
                   continue;
                 }
-                
+
                 std::vector<std::string> stream_keys;
                 std::vector<std::string> last_ids;
                 for (int i = 4; i < 4 + n_streams; ++i) {
@@ -301,18 +301,30 @@ int main(int argc, char **argv) {
                 for (int i = 4 + n_streams; i < 4 + 2 * n_streams; ++i) {
                   last_ids.push_back(args[i]);
                 }
-                
+
+                // If $ is passed as the ID, replace it with the highest ID in the stream at the time of blocking
+                for (int s = 0; s < n_streams; ++s) {
+                  if (last_ids[s] == "$") {
+                    auto it = stream_store.find(stream_keys[s]);
+                    if (it != stream_store.end() && !it->second.empty()) {
+                      last_ids[s] = it->second.back().id;
+                    } else {
+                      last_ids[s] = "0-0";
+                    }
+                  }
+                }
+
                 // Check if there are already new entries
                 std::vector<std::string> xread_args = {"XREAD", "streams"};
                 xread_args.insert(xread_args.end(), stream_keys.begin(), stream_keys.end());
                 xread_args.insert(xread_args.end(), last_ids.begin(), last_ids.end());
-                
+
                 CommandHandler check_handler(kv_store, expiry_store, list_store);
                 std::string response = check_handler.handle(xread_args);
-                
+
                 // Debug output
                 std::cout << "XREAD check response: " << response << std::endl;
-                
+
                 // Check if response contains actual data (not empty streams)
                 bool has_data = false;
                 // Count how many streams have non-zero entries
@@ -336,7 +348,7 @@ int main(int argc, char **argv) {
                     pos = count_end;
                   }
                 }
-                
+
                 if (has_data) {
                   // Send immediate response
                   if (write(fd, response.c_str(), response.size()) < 0) {
@@ -345,7 +357,7 @@ int main(int argc, char **argv) {
                     FD_CLR(fd, &master_set);
                   }
                 } else {
-                  // Block this client
+                  // Block this client, storing the resolved last_ids
                   XreadWaiter w{fd, Clock::now(), timeout, stream_keys, last_ids};
                   xread_waiting_clients.push_back(w);
                 }
