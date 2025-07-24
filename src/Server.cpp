@@ -102,6 +102,8 @@ int main(int argc, char **argv) {
 
   // Transaction state per client fd
   std::unordered_map<int, bool> client_in_multi;
+  // Queued commands per client fd
+  std::unordered_map<int, std::vector<std::vector<std::string>>> client_multi_queue;
   // For this stage, we only need to track if MULTI was called, not queue commands
   while (true) {
     read_fds = master_set;
@@ -249,7 +251,19 @@ int main(int argc, char **argv) {
             // Transaction support: MULTI/EXEC
             if (!args.empty() && cmd_upper == "MULTI") {
               client_in_multi[fd] = true;
+              client_multi_queue[fd].clear();
               std::string response = "+OK\r\n";
+              if (write(fd, response.c_str(), response.size()) < 0) {
+                std::cerr << "Failed to send response to client fd=" << fd << "\n";
+                close(fd);
+                FD_CLR(fd, &master_set);
+              }
+              continue;
+            }
+            if (!args.empty() && client_in_multi.count(fd) && client_in_multi[fd] && cmd_upper != "EXEC") {
+              // Queue command, respond with +QUEUED, do not execute
+              client_multi_queue[fd].push_back(args);
+              std::string response = "+QUEUED\r\n";
               if (write(fd, response.c_str(), response.size()) < 0) {
                 std::cerr << "Failed to send response to client fd=" << fd << "\n";
                 close(fd);
@@ -259,9 +273,19 @@ int main(int argc, char **argv) {
             }
             if (!args.empty() && cmd_upper == "EXEC") {
               if (client_in_multi.count(fd) && client_in_multi[fd]) {
-                // Empty transaction: no commands queued
-                std::string response = "*0\r\n";
+                // Execute queued commands, collect responses
+                std::vector<std::string> responses;
+                for (const auto& qargs : client_multi_queue[fd]) {
+                  CommandHandler handler(kv_store, expiry_store, list_store);
+                  responses.push_back(handler.handle(qargs));
+                }
+                // RESP array of responses
+                std::string response = "*" + std::to_string(responses.size()) + "\r\n";
+                for (const auto& r : responses) {
+                  response += r;
+                }
                 client_in_multi[fd] = false;
+                client_multi_queue[fd].clear();
                 if (write(fd, response.c_str(), response.size()) < 0) {
                   std::cerr << "Failed to send response to client fd=" << fd << "\n";
                   close(fd);
