@@ -100,6 +100,9 @@ int main(int argc, char **argv) {
 
   std::cout << "Server event loop started. Waiting for clients...\n";
 
+  // Transaction state per client fd
+  std::unordered_map<int, bool> client_in_multi;
+  // For this stage, we only need to track if MULTI was called, not queue commands
   while (true) {
     read_fds = master_set;
     // Compute select timeout for BLPOP and XREAD
@@ -228,6 +231,8 @@ int main(int argc, char **argv) {
                 ++xread_it;
               }
             }
+            // Clean up MULTI state
+            client_in_multi.erase(fd);
             close(fd);
             FD_CLR(fd, &master_set);
           } else {
@@ -239,6 +244,38 @@ int main(int argc, char **argv) {
             if (!args.empty()) {
               cmd_upper = args[0];
               std::transform(cmd_upper.begin(), cmd_upper.end(), cmd_upper.begin(), ::toupper);
+            }
+
+            // Transaction support: MULTI/EXEC
+            if (!args.empty() && cmd_upper == "MULTI") {
+              client_in_multi[fd] = true;
+              std::string response = "+OK\r\n";
+              if (write(fd, response.c_str(), response.size()) < 0) {
+                std::cerr << "Failed to send response to client fd=" << fd << "\n";
+                close(fd);
+                FD_CLR(fd, &master_set);
+              }
+              continue;
+            }
+            if (!args.empty() && cmd_upper == "EXEC") {
+              if (client_in_multi.count(fd) && client_in_multi[fd]) {
+                // Empty transaction: no commands queued
+                std::string response = "*0\r\n";
+                client_in_multi[fd] = false;
+                if (write(fd, response.c_str(), response.size()) < 0) {
+                  std::cerr << "Failed to send response to client fd=" << fd << "\n";
+                  close(fd);
+                  FD_CLR(fd, &master_set);
+                }
+              } else {
+                std::string response = "-ERR EXEC without MULTI\r\n";
+                if (write(fd, response.c_str(), response.size()) < 0) {
+                  std::cerr << "Failed to send response to client fd=" << fd << "\n";
+                  close(fd);
+                  FD_CLR(fd, &master_set);
+                }
+              }
+              continue;
             }
             
             // BLPOP handling
