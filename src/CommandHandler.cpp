@@ -29,6 +29,10 @@ std::string CommandHandler::handle(const std::vector<std::string>& args) {
     std::string cmd = args[0];
     std::transform(cmd.begin(), cmd.end(), cmd.begin(), ::toupper);
     
+    // MULTI command: start transaction (queueing not implemented yet)
+    if (cmd == "MULTI" && args.size() == 1) {
+        return "+OK\r\n";
+    }
     // INCR command: key exists and has a numerical value, or key does not exist
     if (cmd == "INCR" && args.size() == 2) {
         std::string key = args[1];
