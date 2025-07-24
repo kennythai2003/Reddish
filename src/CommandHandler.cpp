@@ -20,6 +20,7 @@ bool CommandHandler::isExpired(const std::string& key) {
 }
 
 std::string CommandHandler::handle(const std::vector<std::string>& args) {
+    // ...existing code...
     if (args.empty()) return "-ERR unknown command\r\n";
     std::string cmd = args[0];
     std::transform(cmd.begin(), cmd.end(), cmd.begin(), ::toupper);
