@@ -57,6 +57,19 @@ std::string CommandHandler::handle(const std::vector<std::string>& args) {
             list_store[key].insert(list_store[key].end(), elements.begin(), elements.end());
         }
         return ":" + std::to_string(list_store[key].size()) + "\r\n";
+    } else if (cmd == "LPUSH" && args.size() >= 3) {
+        std::string key = args[1];
+        std::vector<std::string> elements(args.begin() + 2, args.end());
+        // Insert elements in reverse order at the front
+        if (list_store.find(key) == list_store.end()) {
+            // New list: insert in reverse so leftmost arg is head
+            list_store[key] = std::vector<std::string>(elements.rbegin(), elements.rend());
+        } else {
+            // Existing list: insert each element at front in reverse order
+            auto& lst = list_store[key];
+            lst.insert(lst.begin(), elements.rbegin(), elements.rend());
+        }
+        return ":" + std::to_string(list_store[key].size()) + "\r\n";
     } else if (cmd == "LRANGE" && args.size() == 4) {
         std::string key = args[1];
         int start = std::stoi(args[2]);
