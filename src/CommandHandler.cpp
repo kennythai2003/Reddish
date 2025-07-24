@@ -24,15 +24,37 @@ std::string CommandHandler::handle(const std::vector<std::string>& args) {
     if (args.empty()) return "-ERR unknown command\r\n";
     std::string cmd = args[0];
     std::transform(cmd.begin(), cmd.end(), cmd.begin(), ::toupper);
-    if (cmd == "LPOP" && args.size() == 2) {
+    if (cmd == "LPOP" && (args.size() == 2 || args.size() == 3)) {
         std::string key = args[1];
         auto it = list_store.find(key);
         if (it == list_store.end() || it->second.empty()) {
             return "$-1\r\n";
         }
-        std::string val = it->second.front();
-        it->second.erase(it->second.begin());
-        return "$" + std::to_string(val.size()) + "\r\n" + val + "\r\n";
+        int count = 1;
+        if (args.size() == 3) {
+            try {
+                count = std::stoi(args[2]);
+            } catch (...) {
+                return "-ERR value is not an integer or out of range\r\n";
+            }
+            if (count <= 0) {
+                return "*-1\r\n";
+            }
+        }
+        int actual_count = std::min(count, static_cast<int>(it->second.size()));
+        if (actual_count == 1) {
+            std::string val = it->second.front();
+            it->second.erase(it->second.begin());
+            return "$" + std::to_string(val.size()) + "\r\n" + val + "\r\n";
+        } else {
+            std::string resp = "*" + std::to_string(actual_count) + "\r\n";
+            for (int i = 0; i < actual_count; ++i) {
+                std::string val = it->second.front();
+                it->second.erase(it->second.begin());
+                resp += "$" + std::to_string(val.size()) + "\r\n" + val + "\r\n";
+            }
+            return resp;
+        }
     }
     if (cmd == "LLEN" && args.size() == 2) {
         std::string key = args[1];
