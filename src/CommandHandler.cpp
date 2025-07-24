@@ -295,12 +295,11 @@ std::string CommandHandler::handle(const std::vector<std::string>& args) {
                 ms = std::stoll(entry.id.substr(0, dash));
                 seq = std::stoll(entry.id.substr(dash + 1));
             } catch (...) { continue; }
-            // Inclusive range
-            bool in_range = false;
-            if (ms > start_ms && ms < end_ms) in_range = true;
-            else if (ms == start_ms && seq >= start_seq) in_range = true;
-            else if (ms == end_ms && seq <= end_seq) in_range = true;
-            if (in_range) result.push_back(&entry);
+            // Only include entries with IDs >= start and <= end
+            if ((ms > start_ms || (ms == start_ms && seq >= start_seq)) &&
+                (ms < end_ms || (ms == end_ms && seq <= end_seq))) {
+                result.push_back(&entry);
+            }
         }
         std::string resp = "*" + std::to_string(result.size()) + "\r\n";
         for (const auto* entry : result) {
