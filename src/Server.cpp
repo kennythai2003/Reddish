@@ -261,15 +261,28 @@ int main(int argc, char **argv) {
               continue;
             }
             if (!args.empty() && client_in_multi.count(fd) && client_in_multi[fd] && cmd_upper != "EXEC") {
-              // Queue command, respond with +QUEUED, do not execute
-              client_multi_queue[fd].push_back(args);
-              std::string response = "+QUEUED\r\n";
-              if (write(fd, response.c_str(), response.size()) < 0) {
-                std::cerr << "Failed to send response to client fd=" << fd << "\n";
-                close(fd);
-                FD_CLR(fd, &master_set);
+              // DISCARD should not be queued, handle immediately
+              if (cmd_upper == "DISCARD") {
+                client_in_multi[fd] = false;
+                client_multi_queue[fd].clear();
+                std::string response = "+OK\r\n";
+                if (write(fd, response.c_str(), response.size()) < 0) {
+                  std::cerr << "Failed to send response to client fd=" << fd << "\n";
+                  close(fd);
+                  FD_CLR(fd, &master_set);
+                }
+                continue;
+              } else {
+                // Queue command, respond with +QUEUED, do not execute
+                client_multi_queue[fd].push_back(args);
+                std::string response = "+QUEUED\r\n";
+                if (write(fd, response.c_str(), response.size()) < 0) {
+                  std::cerr << "Failed to send response to client fd=" << fd << "\n";
+                  close(fd);
+                  FD_CLR(fd, &master_set);
+                }
+                continue;
               }
-              continue;
             }
             if (!args.empty() && cmd_upper == "EXEC") {
               if (client_in_multi.count(fd) && client_in_multi[fd]) {
