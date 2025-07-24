@@ -136,6 +136,13 @@ std::string CommandHandler::handle(const std::vector<std::string>& args) {
             resp += "$" + std::to_string(list[i].size()) + "\r\n" + list[i] + "\r\n";
         }
         return resp;
+    } else if (cmd == "TYPE" && args.size() == 2) {
+        std::string key = args[1];
+        if (kv_store.find(key) != kv_store.end()) {
+            return "+string\r\n";
+        } else {
+            return "+none\r\n";
+        }
     }
     return "-ERR unknown command\r\n";
 }
