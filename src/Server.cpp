@@ -302,6 +302,28 @@ int main(int argc, char **argv) {
               continue;
             }
             
+            // DISCARD handling
+            if (!args.empty() && cmd_upper == "DISCARD") {
+              if (client_in_multi.count(fd) && client_in_multi[fd]) {
+                client_in_multi[fd] = false;
+                client_multi_queue[fd].clear();
+                std::string response = "+OK\r\n";
+                if (write(fd, response.c_str(), response.size()) < 0) {
+                  std::cerr << "Failed to send response to client fd=" << fd << "\n";
+                  close(fd);
+                  FD_CLR(fd, &master_set);
+                }
+              } else {
+                std::string response = "-ERR DISCARD without MULTI\r\n";
+                if (write(fd, response.c_str(), response.size()) < 0) {
+                  std::cerr << "Failed to send response to client fd=" << fd << "\n";
+                  close(fd);
+                  FD_CLR(fd, &master_set);
+                }
+              }
+              continue;
+            }
+            
             // BLPOP handling
             if (!args.empty() && cmd_upper == "BLPOP" && args.size() == 3) {
               std::string list_key = args[1];
