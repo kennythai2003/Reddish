@@ -24,6 +24,16 @@ std::string CommandHandler::handle(const std::vector<std::string>& args) {
     if (args.empty()) return "-ERR unknown command\r\n";
     std::string cmd = args[0];
     std::transform(cmd.begin(), cmd.end(), cmd.begin(), ::toupper);
+    if (cmd == "LPOP" && args.size() == 2) {
+        std::string key = args[1];
+        auto it = list_store.find(key);
+        if (it == list_store.end() || it->second.empty()) {
+            return "$-1\r\n";
+        }
+        std::string val = it->second.front();
+        it->second.erase(it->second.begin());
+        return "$" + std::to_string(val.size()) + "\r\n" + val + "\r\n";
+    }
     if (cmd == "LLEN" && args.size() == 2) {
         std::string key = args[1];
         auto it = list_store.find(key);
