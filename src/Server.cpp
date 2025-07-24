@@ -482,6 +482,18 @@ int main(int argc, char **argv) {
               }
             }
             
+            // INFO replication handling
+            if (!args.empty() && cmd_upper == "INFO" && args.size() >= 2 && args[1] == "replication") {
+              std::string info = "role:master\r\n";
+              std::string response = "$" + std::to_string(info.size()) + "\r\n" + info;
+              if (write(fd, response.c_str(), response.size()) < 0) {
+                std::cerr << "Failed to send response to client fd=" << fd << "\n";
+                close(fd);
+                FD_CLR(fd, &master_set);
+              }
+              continue;
+            }
+            
             // Normal command handling
             CommandHandler handler(kv_store, expiry_store, list_store);
             std::string response = handler.handle(args);
