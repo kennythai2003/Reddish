@@ -286,11 +286,20 @@ int main(int argc, char **argv) {
             }
             if (!args.empty() && cmd_upper == "EXEC") {
               if (client_in_multi.count(fd) && client_in_multi[fd]) {
-                // Execute queued commands, collect responses
+                // Execute queued commands, collect responses (including errors)
                 std::vector<std::string> responses;
                 for (const auto& qargs : client_multi_queue[fd]) {
                   CommandHandler handler(kv_store, expiry_store, list_store);
-                  responses.push_back(handler.handle(qargs));
+                  std::string resp = handler.handle(qargs);
+                  // If response is empty, treat as null bulk string
+                  if (resp.empty()) {
+                    responses.push_back("$-1\r\n");
+                  } else if (!resp.empty() && resp[0] == '-') {
+                    // Error response, keep as is
+                    responses.push_back(resp);
+                  } else {
+                    responses.push_back(resp);
+                  }
                 }
                 // RESP array of responses
                 std::string response = "*" + std::to_string(responses.size()) + "\r\n";
