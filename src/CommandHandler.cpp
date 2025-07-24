@@ -1,6 +1,7 @@
 #include "CommandHandler.h"
 #include <algorithm>
 #include <map>
+#include <climits>
 
 CommandHandler::CommandHandler(
     std::unordered_map<std::string, std::string>& kv,
