@@ -338,7 +338,7 @@ std::string CommandHandler::handle(const std::vector<std::string>& args) {
         if ((args.size() - 2) % 2 != 0 || n_streams < 1) {
             return "-ERR wrong number of arguments for 'XREAD' command\r\n";
         }
-        
+
         std::vector<std::string> stream_keys;
         std::vector<std::string> last_ids;
         for (int i = 2; i < 2 + n_streams; ++i) {
@@ -347,20 +347,33 @@ std::string CommandHandler::handle(const std::vector<std::string>& args) {
         for (int i = 2 + n_streams; i < 2 + 2 * n_streams; ++i) {
             last_ids.push_back(args[i]);
         }
-        
+
+        // If $ is passed as the ID, replace it with the highest ID in the stream
+        for (int s = 0; s < n_streams; ++s) {
+            if (last_ids[s] == "$") {
+                auto it = stream_store.find(stream_keys[s]);
+                if (it != stream_store.end() && !it->second.empty()) {
+                    // Find the highest ID
+                    last_ids[s] = it->second.back().id;
+                } else {
+                    last_ids[s] = "0-0";
+                }
+            }
+        }
+
         std::string resp = "*" + std::to_string(n_streams) + "\r\n";
         for (int s = 0; s < n_streams; ++s) {
             const std::string& stream_key = stream_keys[s];
             const std::string& last_id = last_ids[s];
             auto it = stream_store.find(stream_key);
-            
+
             resp += "*2\r\n$" + std::to_string(stream_key.size()) + "\r\n" + stream_key + "\r\n";
-            
+
             if (it == stream_store.end()) {
                 resp += "*0\r\n";
                 continue;
             }
-            
+
             // Parse last_id
             size_t dash = last_id.find('-');
             long long last_ms = 0, last_seq = 0;
@@ -373,7 +386,7 @@ std::string CommandHandler::handle(const std::vector<std::string>& args) {
                 try { last_ms = std::stoll(last_id); } catch (...) {}
                 last_seq = 0;
             }
-            
+
             const std::vector<StreamEntry>& entries = it->second;
             std::vector<const StreamEntry*> result;
             for (const auto& entry : entries) {
@@ -389,7 +402,7 @@ std::string CommandHandler::handle(const std::vector<std::string>& args) {
                     result.push_back(&entry);
                 }
             }
-            
+
             resp += "*" + std::to_string(result.size()) + "\r\n";
             for (const auto* entry : result) {
                 resp += "*2\r\n";
