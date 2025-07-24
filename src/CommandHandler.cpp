@@ -321,49 +321,66 @@ std::string CommandHandler::handle(const std::vector<std::string>& args) {
             }
         }
         return resp;
-    } else if (cmd == "XREAD" && args.size() == 4 && args[1] == "streams") {
-        std::string stream_key = args[2];
-        std::string last_id = args[3];
-        auto it = stream_store.find(stream_key);
-        if (it == stream_store.end()) {
-            return "*0\r\n";
+    } else if (cmd == "XREAD" && args.size() >= 4 && args[1] == "streams") {
+        // Find the split between stream keys and IDs
+        int n_streams = (args.size() - 2) / 2;
+        if ((args.size() - 2) % 2 != 0 || n_streams < 1) {
+            return "-ERR wrong number of arguments for 'XREAD' command\r\n";
         }
-        // Parse last_id
-        size_t dash = last_id.find('-');
-        long long last_ms = 0, last_seq = 0;
-        if (dash != std::string::npos) {
-            try {
-                last_ms = std::stoll(last_id.substr(0, dash));
-                last_seq = std::stoll(last_id.substr(dash + 1));
-            } catch (...) {}
-        } else {
-            try { last_ms = std::stoll(last_id); } catch (...) {}
-            last_seq = 0;
+        std::vector<std::string> stream_keys;
+        std::vector<std::string> last_ids;
+        for (int i = 2; i < 2 + n_streams; ++i) {
+            stream_keys.push_back(args[i]);
         }
-        const std::vector<StreamEntry>& entries = it->second;
-        std::vector<const StreamEntry*> result;
-        for (const auto& entry : entries) {
-            size_t e_dash = entry.id.find('-');
-            if (e_dash == std::string::npos) continue;
-            long long ms = 0, seq = 0;
-            try {
-                ms = std::stoll(entry.id.substr(0, e_dash));
-                seq = std::stoll(entry.id.substr(e_dash + 1));
-            } catch (...) { continue; }
-            // Only include entries with IDs > last_id (exclusive)
-            if (ms > last_ms || (ms == last_ms && seq > last_seq)) {
-                result.push_back(&entry);
+        for (int i = 2 + n_streams; i < 2 + 2 * n_streams; ++i) {
+            last_ids.push_back(args[i]);
+        }
+        std::string resp = "*" + std::to_string(n_streams) + "\r\n";
+        for (int s = 0; s < n_streams; ++s) {
+            const std::string& stream_key = stream_keys[s];
+            const std::string& last_id = last_ids[s];
+            auto it = stream_store.find(stream_key);
+            resp += "*2\r\n$" + std::to_string(stream_key.size()) + "\r\n" + stream_key + "\r\n";
+            if (it == stream_store.end()) {
+                resp += "*0\r\n";
+                continue;
             }
-        }
-        std::string resp = "*1\r\n*2\r\n$" + std::to_string(stream_key.size()) + "\r\n" + stream_key + "\r\n";
-        resp += "*" + std::to_string(result.size()) + "\r\n";
-        for (const auto* entry : result) {
-            resp += "*2\r\n";
-            resp += "$" + std::to_string(entry->id.size()) + "\r\n" + entry->id + "\r\n";
-            resp += "*" + std::to_string(entry->fields.size() * 2) + "\r\n";
-            for (const auto& kv : entry->fields) {
-                resp += "$" + std::to_string(kv.first.size()) + "\r\n" + kv.first + "\r\n";
-                resp += "$" + std::to_string(kv.second.size()) + "\r\n" + kv.second + "\r\n";
+            // Parse last_id
+            size_t dash = last_id.find('-');
+            long long last_ms = 0, last_seq = 0;
+            if (dash != std::string::npos) {
+                try {
+                    last_ms = std::stoll(last_id.substr(0, dash));
+                    last_seq = std::stoll(last_id.substr(dash + 1));
+                } catch (...) {}
+            } else {
+                try { last_ms = std::stoll(last_id); } catch (...) {}
+                last_seq = 0;
+            }
+            const std::vector<StreamEntry>& entries = it->second;
+            std::vector<const StreamEntry*> result;
+            for (const auto& entry : entries) {
+                size_t e_dash = entry.id.find('-');
+                if (e_dash == std::string::npos) continue;
+                long long ms = 0, seq = 0;
+                try {
+                    ms = std::stoll(entry.id.substr(0, e_dash));
+                    seq = std::stoll(entry.id.substr(e_dash + 1));
+                } catch (...) { continue; }
+                // Only include entries with IDs > last_id (exclusive)
+                if (ms > last_ms || (ms == last_ms && seq > last_seq)) {
+                    result.push_back(&entry);
+                }
+            }
+            resp += "*" + std::to_string(result.size()) + "\r\n";
+            for (const auto* entry : result) {
+                resp += "*2\r\n";
+                resp += "$" + std::to_string(entry->id.size()) + "\r\n" + entry->id + "\r\n";
+                resp += "*" + std::to_string(entry->fields.size() * 2) + "\r\n";
+                for (const auto& kv : entry->fields) {
+                    resp += "$" + std::to_string(kv.first.size()) + "\r\n" + kv.first + "\r\n";
+                    resp += "$" + std::to_string(kv.second.size()) + "\r\n" + kv.second + "\r\n";
+                }
             }
         }
         return resp;
