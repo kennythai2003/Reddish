@@ -255,6 +255,10 @@ std::string CommandHandler::handle(const std::vector<std::string>& args) {
         }
         // Helper to parse id, defaulting sequence number if missing
         auto parse_id = [](const std::string& id, bool is_start, const std::vector<StreamEntry>& entries) -> std::pair<long long, long long> {
+            if (is_start && id == "-") {
+                // Beginning of stream
+                return {LLONG_MIN, LLONG_MIN};
+            }
             size_t dash = id.find('-');
             if (dash != std::string::npos) {
                 long long ms = 0, seq = 0;
