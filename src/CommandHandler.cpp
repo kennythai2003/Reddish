@@ -3,6 +3,14 @@
 #include <map>
 #include <climits>
 
+// Add a new type for stream entries
+struct StreamEntry {
+    std::string id;
+    std::map<std::string, std::string> fields;
+};
+// Make stream_store a static member that persists across instances
+static std::unordered_map<std::string, std::vector<StreamEntry>> stream_store;
+
 CommandHandler::CommandHandler(
     std::unordered_map<std::string, std::string>& kv,
     std::unordered_map<std::string, std::chrono::steady_clock::time_point>& expiry,
@@ -21,19 +29,11 @@ bool CommandHandler::isExpired(const std::string& key) {
     return false;
 }
 
-// Add a new type for stream entries
-struct StreamEntry {
-    std::string id;
-    std::map<std::string, std::string> fields;
-};
-// Add a new member for streams
-static std::unordered_map<std::string, std::vector<StreamEntry>> stream_store;
-
 std::string CommandHandler::handle(const std::vector<std::string>& args) {
-    // ...existing code...
     if (args.empty()) return "-ERR unknown command\r\n";
     std::string cmd = args[0];
     std::transform(cmd.begin(), cmd.end(), cmd.begin(), ::toupper);
+    
     if (cmd == "LPOP" && (args.size() == 2 || args.size() == 3)) {
         std::string key = args[1];
         auto it = list_store.find(key);
@@ -66,12 +66,14 @@ std::string CommandHandler::handle(const std::vector<std::string>& args) {
             return resp;
         }
     }
+    
     if (cmd == "LLEN" && args.size() == 2) {
         std::string key = args[1];
         auto it = list_store.find(key);
         int len = (it == list_store.end()) ? 0 : static_cast<int>(it->second.size());
         return ":" + std::to_string(len) + "\r\n";
     }
+    
     if (cmd == "PING" && args.size() == 1) {
         return "+PONG\r\n";
     } else if (cmd == "ECHO" && args.size() == 2) {
@@ -153,6 +155,7 @@ std::string CommandHandler::handle(const std::vector<std::string>& args) {
         bool auto_time = (entry_id == "*");
         bool auto_seq = false;
         std::string ms_str, seq_str;
+        
         if (auto_time) {
             // Get current unix time in ms
             ms = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -229,6 +232,7 @@ std::string CommandHandler::handle(const std::vector<std::string>& args) {
                 }
             }
         }
+        
         std::string final_id = ms_str + "-" + std::to_string(seq);
         StreamEntry entry;
         entry.id = final_id;
@@ -237,6 +241,7 @@ std::string CommandHandler::handle(const std::vector<std::string>& args) {
         }
         stream_store[stream_key].push_back(entry);
         return "$" + std::to_string(final_id.size()) + "\r\n" + final_id + "\r\n";
+        
     } else if (cmd == "TYPE" && args.size() == 2) {
         std::string key = args[1];
         if (kv_store.find(key) != kv_store.end()) {
@@ -246,6 +251,7 @@ std::string CommandHandler::handle(const std::vector<std::string>& args) {
         } else {
             return "+none\r\n";
         }
+        
     } else if (cmd == "XRANGE" && args.size() == 4) {
         std::string stream_key = args[1];
         std::string start_id = args[2];
@@ -254,6 +260,7 @@ std::string CommandHandler::handle(const std::vector<std::string>& args) {
         if (it == stream_store.end()) {
             return "*0\r\n";
         }
+        
         // Helper to parse id, defaulting sequence number if missing
         auto parse_id = [](const std::string& id, bool is_start, const std::vector<StreamEntry>& entries) -> std::pair<long long, long long> {
             if (is_start && id == "-") {
@@ -292,9 +299,11 @@ std::string CommandHandler::handle(const std::vector<std::string>& args) {
                 return {ms, max_seq};
             }
         };
+        
         const std::vector<StreamEntry>& entries = it->second;
         auto [start_ms, start_seq] = parse_id(start_id, true, entries);
         auto [end_ms, end_seq] = parse_id(end_id, false, entries);
+        
         std::vector<const StreamEntry*> result;
         for (const auto& entry : entries) {
             size_t dash = entry.id.find('-');
@@ -310,6 +319,7 @@ std::string CommandHandler::handle(const std::vector<std::string>& args) {
                 result.push_back(&entry);
             }
         }
+        
         std::string resp = "*" + std::to_string(result.size()) + "\r\n";
         for (const auto* entry : result) {
             resp += "*2\r\n";
@@ -321,12 +331,14 @@ std::string CommandHandler::handle(const std::vector<std::string>& args) {
             }
         }
         return resp;
+        
     } else if (cmd == "XREAD" && args.size() >= 4 && args[1] == "streams") {
         // Find the split between stream keys and IDs
         int n_streams = (args.size() - 2) / 2;
         if ((args.size() - 2) % 2 != 0 || n_streams < 1) {
             return "-ERR wrong number of arguments for 'XREAD' command\r\n";
         }
+        
         std::vector<std::string> stream_keys;
         std::vector<std::string> last_ids;
         for (int i = 2; i < 2 + n_streams; ++i) {
@@ -335,16 +347,20 @@ std::string CommandHandler::handle(const std::vector<std::string>& args) {
         for (int i = 2 + n_streams; i < 2 + 2 * n_streams; ++i) {
             last_ids.push_back(args[i]);
         }
+        
         std::string resp = "*" + std::to_string(n_streams) + "\r\n";
         for (int s = 0; s < n_streams; ++s) {
             const std::string& stream_key = stream_keys[s];
             const std::string& last_id = last_ids[s];
             auto it = stream_store.find(stream_key);
+            
             resp += "*2\r\n$" + std::to_string(stream_key.size()) + "\r\n" + stream_key + "\r\n";
+            
             if (it == stream_store.end()) {
                 resp += "*0\r\n";
                 continue;
             }
+            
             // Parse last_id
             size_t dash = last_id.find('-');
             long long last_ms = 0, last_seq = 0;
@@ -357,6 +373,7 @@ std::string CommandHandler::handle(const std::vector<std::string>& args) {
                 try { last_ms = std::stoll(last_id); } catch (...) {}
                 last_seq = 0;
             }
+            
             const std::vector<StreamEntry>& entries = it->second;
             std::vector<const StreamEntry*> result;
             for (const auto& entry : entries) {
@@ -372,6 +389,7 @@ std::string CommandHandler::handle(const std::vector<std::string>& args) {
                     result.push_back(&entry);
                 }
             }
+            
             resp += "*" + std::to_string(result.size()) + "\r\n";
             for (const auto* entry : result) {
                 resp += "*2\r\n";
@@ -385,5 +403,6 @@ std::string CommandHandler::handle(const std::vector<std::string>& args) {
         }
         return resp;
     }
+    
     return "-ERR unknown command\r\n";
 }
