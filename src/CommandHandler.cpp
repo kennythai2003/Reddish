@@ -3,8 +3,8 @@
 #include <map>
 #include <climits>
 
-// Make stream_store a static member that persists across instances
-static std::unordered_map<std::string, std::vector<StreamEntry>> stream_store;
+// Make stream_store a global variable that persists across translation units
+std::unordered_map<std::string, std::vector<StreamEntry>> stream_store;
 
 CommandHandler::CommandHandler(
     std::unordered_map<std::string, std::string>& kv,
