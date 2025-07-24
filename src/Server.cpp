@@ -70,13 +70,21 @@ int main(int argc, char **argv) {
     return 1;
   }
   
+  // Parse --port flag if present
+  int port = 6379;
+  for (int i = 1; i < argc; ++i) {
+    if (std::string(argv[i]) == "--port" && i + 1 < argc) {
+      port = std::atoi(argv[i + 1]);
+    }
+  }
+
   struct sockaddr_in server_addr;
   server_addr.sin_family = AF_INET;
   server_addr.sin_addr.s_addr = INADDR_ANY;
-  server_addr.sin_port = htons(6379);
-  
+  server_addr.sin_port = htons(port);
+
   if (bind(server_fd, (struct sockaddr *) &server_addr, sizeof(server_addr)) != 0) {
-    std::cerr << "Failed to bind to port 6379\n";
+    std::cerr << "Failed to bind to port " << port << "\n";
     return 1;
   }
   
