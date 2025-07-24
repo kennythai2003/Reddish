@@ -1,5 +1,6 @@
 #include "CommandHandler.h"
 #include <algorithm>
+#include <map>
 
 CommandHandler::CommandHandler(
     std::unordered_map<std::string, std::string>& kv,
@@ -18,6 +19,14 @@ bool CommandHandler::isExpired(const std::string& key) {
     }
     return false;
 }
+
+// Add a new type for stream entries
+struct StreamEntry {
+    std::string id;
+    std::map<std::string, std::string> fields;
+};
+// Add a new member for streams
+static std::unordered_map<std::string, std::vector<StreamEntry>> stream_store;
 
 std::string CommandHandler::handle(const std::vector<std::string>& args) {
     // ...existing code...
@@ -136,10 +145,22 @@ std::string CommandHandler::handle(const std::vector<std::string>& args) {
             resp += "$" + std::to_string(list[i].size()) + "\r\n" + list[i] + "\r\n";
         }
         return resp;
+    } else if (cmd == "XADD" && args.size() >= 4 && args.size() % 2 == 0) {
+        std::string stream_key = args[1];
+        std::string entry_id = args[2];
+        StreamEntry entry;
+        entry.id = entry_id;
+        for (size_t i = 3; i + 1 < args.size(); i += 2) {
+            entry.fields[args[i]] = args[i + 1];
+        }
+        stream_store[stream_key].push_back(entry);
+        return "$" + std::to_string(entry_id.size()) + "\r\n" + entry_id + "\r\n";
     } else if (cmd == "TYPE" && args.size() == 2) {
         std::string key = args[1];
         if (kv_store.find(key) != kv_store.end()) {
             return "+string\r\n";
+        } else if (stream_store.find(key) != stream_store.end()) {
+            return "+stream\r\n";
         } else {
             return "+none\r\n";
         }
