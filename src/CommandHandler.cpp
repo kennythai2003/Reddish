@@ -29,7 +29,7 @@ std::string CommandHandler::handle(const std::vector<std::string>& args) {
     std::string cmd = args[0];
     std::transform(cmd.begin(), cmd.end(), cmd.begin(), ::toupper);
     
-    // INCR command: key exists and has a numerical value
+    // INCR command: key exists and has a numerical value, or key does not exist
     if (cmd == "INCR" && args.size() == 2) {
         std::string key = args[1];
         auto it = kv_store.find(key);
@@ -44,8 +44,11 @@ std::string CommandHandler::handle(const std::vector<std::string>& args) {
                 // Will handle non-integer values in later stages
                 return "-ERR value is not an integer or out of range\r\n";
             }
+        } else {
+            // Key does not exist: set to 1
+            kv_store[key] = "1";
+            return ":1\r\n";
         }
-        // Will handle key not existing in later stages
     }
     if (cmd == "LPOP" && (args.size() == 2 || args.size() == 3)) {
         std::string key = args[1];
