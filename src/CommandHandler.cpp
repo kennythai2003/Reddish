@@ -245,6 +245,74 @@ std::string CommandHandler::handle(const std::vector<std::string>& args) {
         } else {
             return "+none\r\n";
         }
+    } else if (cmd == "XRANGE" && args.size() == 4) {
+        std::string stream_key = args[1];
+        std::string start_id = args[2];
+        std::string end_id = args[3];
+        auto it = stream_store.find(stream_key);
+        if (it == stream_store.end()) {
+            return "*0\r\n";
+        }
+        // Helper to parse id, defaulting sequence number if missing
+        auto parse_id = [](const std::string& id, bool is_start, const std::vector<StreamEntry>& entries) -> std::pair<long long, long long> {
+            size_t dash = id.find('-');
+            if (dash != std::string::npos) {
+                long long ms = 0, seq = 0;
+                try {
+                    ms = std::stoll(id.substr(0, dash));
+                    seq = std::stoll(id.substr(dash + 1));
+                } catch (...) {}
+                return {ms, seq};
+            } else {
+                long long ms = 0;
+                try { ms = std::stoll(id); } catch (...) {}
+                if (is_start) return {ms, 0};
+                // Find max sequence number for ms
+                long long max_seq = 0;
+                for (const auto& e : entries) {
+                    size_t e_dash = e.id.find('-');
+                    if (e_dash != std::string::npos) {
+                        long long e_ms = 0, e_seq = 0;
+                        try {
+                            e_ms = std::stoll(e.id.substr(0, e_dash));
+                            e_seq = std::stoll(e.id.substr(e_dash + 1));
+                        } catch (...) { continue; }
+                        if (e_ms == ms && e_seq > max_seq) max_seq = e_seq;
+                    }
+                }
+                return {ms, max_seq};
+            }
+        };
+        const std::vector<StreamEntry>& entries = it->second;
+        auto [start_ms, start_seq] = parse_id(start_id, true, entries);
+        auto [end_ms, end_seq] = parse_id(end_id, false, entries);
+        std::vector<const StreamEntry*> result;
+        for (const auto& entry : entries) {
+            size_t dash = entry.id.find('-');
+            if (dash == std::string::npos) continue;
+            long long ms = 0, seq = 0;
+            try {
+                ms = std::stoll(entry.id.substr(0, dash));
+                seq = std::stoll(entry.id.substr(dash + 1));
+            } catch (...) { continue; }
+            // Inclusive range
+            bool in_range = false;
+            if (ms > start_ms && ms < end_ms) in_range = true;
+            else if (ms == start_ms && seq >= start_seq) in_range = true;
+            else if (ms == end_ms && seq <= end_seq) in_range = true;
+            if (in_range) result.push_back(&entry);
+        }
+        std::string resp = "*" + std::to_string(result.size()) + "\r\n";
+        for (const auto* entry : result) {
+            resp += "*2\r\n";
+            resp += "$" + std::to_string(entry->id.size()) + "\r\n" + entry->id + "\r\n";
+            resp += "*" + std::to_string(entry->fields.size() * 2) + "\r\n";
+            for (const auto& kv : entry->fields) {
+                resp += "$" + std::to_string(kv.first.size()) + "\r\n" + kv.first + "\r\n";
+                resp += "$" + std::to_string(kv.second.size()) + "\r\n" + kv.second + "\r\n";
+            }
+        }
+        return resp;
     }
     return "-ERR unknown command\r\n";
 }
