@@ -57,6 +57,27 @@ std::string CommandHandler::handle(const std::vector<std::string>& args) {
             list_store[key].insert(list_store[key].end(), elements.begin(), elements.end());
         }
         return ":" + std::to_string(list_store[key].size()) + "\r\n";
+    } else if (cmd == "LRANGE" && args.size() == 4) {
+        std::string key = args[1];
+        int start = std::stoi(args[2]);
+        int stop = std::stoi(args[3]);
+        auto it = list_store.find(key);
+        if (it == list_store.end()) {
+            return "*0\r\n";
+        }
+        const std::vector<std::string>& list = it->second;
+        int list_size = static_cast<int>(list.size());
+        if (start >= list_size || start > stop) {
+            return "*0\r\n";
+        }
+        if (stop >= list_size) stop = list_size - 1;
+        int count = stop - start + 1;
+        if (count <= 0) return "*0\r\n";
+        std::string resp = "*" + std::to_string(count) + "\r\n";
+        for (int i = start; i <= stop; ++i) {
+            resp += "$" + std::to_string(list[i].size()) + "\r\n" + list[i] + "\r\n";
+        }
+        return resp;
     }
     return "-ERR unknown command\r\n";
 }
