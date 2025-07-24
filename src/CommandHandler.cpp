@@ -260,6 +260,10 @@ std::string CommandHandler::handle(const std::vector<std::string>& args) {
                 // Beginning of stream
                 return {LLONG_MIN, LLONG_MIN};
             }
+            if (!is_start && id == "+") {
+                // End of stream
+                return {LLONG_MAX, LLONG_MAX};
+            }
             size_t dash = id.find('-');
             if (dash != std::string::npos) {
                 long long ms = 0, seq = 0;
