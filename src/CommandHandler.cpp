@@ -67,6 +67,12 @@ std::string CommandHandler::handle(const std::vector<std::string>& args) {
         }
         const std::vector<std::string>& list = it->second;
         int list_size = static_cast<int>(list.size());
+        // Handle negative indexes
+        if (start < 0) start = list_size + start;
+        if (stop < 0) stop = list_size + stop;
+        // Clamp to valid range
+        if (start < 0) start = 0;
+        if (stop < 0) stop = 0;
         if (start >= list_size || start > stop) {
             return "*0\r\n";
         }
