@@ -148,7 +148,6 @@ std::string CommandHandler::handle(const std::vector<std::string>& args) {
     } else if (cmd == "XADD" && args.size() >= 5 && (args.size() - 3) % 2 == 0) {
         std::string stream_key = args[1];
         std::string entry_id = args[2];
-        // Validate entry_id format: <millisecondsTime>-<sequenceNumber>
         size_t dash_pos = entry_id.find('-');
         if (dash_pos == std::string::npos) {
             return "-ERR The ID specified in XADD is invalid\r\n";
@@ -156,22 +155,41 @@ std::string CommandHandler::handle(const std::vector<std::string>& args) {
         std::string ms_str = entry_id.substr(0, dash_pos);
         std::string seq_str = entry_id.substr(dash_pos + 1);
         long long ms = 0, seq = 0;
+        bool auto_seq = (seq_str == "*");
         try {
             ms = std::stoll(ms_str);
-            seq = std::stoll(seq_str);
+            if (!auto_seq) seq = std::stoll(seq_str);
         } catch (...) {
             return "-ERR The ID specified in XADD is invalid\r\n";
         }
         // Minimum allowed ID is 0-1
-        if (ms == 0 && seq == 0) {
+        if (ms == 0 && !auto_seq && seq == 0) {
             return "-ERR The ID specified in XADD must be greater than 0-0\r\n";
         }
-        if (ms < 0 || seq < 0) {
+        if (ms < 0 || (!auto_seq && seq < 0)) {
             return "-ERR The ID specified in XADD is invalid\r\n";
         }
-        // Validate against last entry
         auto& entries = stream_store[stream_key];
-        if (!entries.empty()) {
+        if (auto_seq) {
+            // Find last sequence number for this ms
+            long long last_seq = -1;
+            for (const auto& e : entries) {
+                size_t e_dash = e.id.find('-');
+                if (e_dash != std::string::npos) {
+                    long long e_ms = 0, e_seq = 0;
+                    try {
+                        e_ms = std::stoll(e.id.substr(0, e_dash));
+                        e_seq = std::stoll(e.id.substr(e_dash + 1));
+                    } catch (...) { continue; }
+                    if (e_ms == ms && e_seq > last_seq) last_seq = e_seq;
+                }
+            }
+            // Default sequence number is 1 if ms==0 and no entries, else 0
+            if (ms == 0 && last_seq == -1) seq = 1;
+            else seq = last_seq + 1;
+        }
+        // Validate against last entry for explicit IDs only
+        if (!auto_seq && !entries.empty()) {
             const StreamEntry& last = entries.back();
             size_t last_dash = last.id.find('-');
             long long last_ms = 0, last_seq = 0;
@@ -179,21 +197,20 @@ std::string CommandHandler::handle(const std::vector<std::string>& args) {
                 try {
                     last_ms = std::stoll(last.id.substr(0, last_dash));
                     last_seq = std::stoll(last.id.substr(last_dash + 1));
-                } catch (...) {
-                    // Should not happen, skip
-                }
+                } catch (...) {}
             }
             if (ms < last_ms || (ms == last_ms && seq <= last_seq)) {
                 return "-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n";
             }
         }
+        std::string final_id = ms_str + "-" + std::to_string(seq);
         StreamEntry entry;
-        entry.id = entry_id;
+        entry.id = final_id;
         for (size_t i = 3; i + 1 < args.size(); i += 2) {
             entry.fields[args[i]] = args[i + 1];
         }
         entries.push_back(entry);
-        return "$" + std::to_string(entry_id.size()) + "\r\n" + entry_id + "\r\n";
+        return "$" + std::to_string(final_id.size()) + "\r\n" + final_id + "\r\n";
     } else if (cmd == "TYPE" && args.size() == 2) {
         std::string key = args[1];
         if (kv_store.find(key) != kv_store.end()) {
