@@ -148,12 +148,51 @@ std::string CommandHandler::handle(const std::vector<std::string>& args) {
     } else if (cmd == "XADD" && args.size() >= 5 && (args.size() - 3) % 2 == 0) {
         std::string stream_key = args[1];
         std::string entry_id = args[2];
+        // Validate entry_id format: <millisecondsTime>-<sequenceNumber>
+        size_t dash_pos = entry_id.find('-');
+        if (dash_pos == std::string::npos) {
+            return "-ERR The ID specified in XADD is invalid\r\n";
+        }
+        std::string ms_str = entry_id.substr(0, dash_pos);
+        std::string seq_str = entry_id.substr(dash_pos + 1);
+        long long ms = 0, seq = 0;
+        try {
+            ms = std::stoll(ms_str);
+            seq = std::stoll(seq_str);
+        } catch (...) {
+            return "-ERR The ID specified in XADD is invalid\r\n";
+        }
+        // Minimum allowed ID is 0-1
+        if (ms == 0 && seq == 0) {
+            return "-ERR The ID specified in XADD must be greater than 0-0\r\n";
+        }
+        if (ms < 0 || seq < 0) {
+            return "-ERR The ID specified in XADD is invalid\r\n";
+        }
+        // Validate against last entry
+        auto& entries = stream_store[stream_key];
+        if (!entries.empty()) {
+            const StreamEntry& last = entries.back();
+            size_t last_dash = last.id.find('-');
+            long long last_ms = 0, last_seq = 0;
+            if (last_dash != std::string::npos) {
+                try {
+                    last_ms = std::stoll(last.id.substr(0, last_dash));
+                    last_seq = std::stoll(last.id.substr(last_dash + 1));
+                } catch (...) {
+                    // Should not happen, skip
+                }
+            }
+            if (ms < last_ms || (ms == last_ms && seq <= last_seq)) {
+                return "-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n";
+            }
+        }
         StreamEntry entry;
         entry.id = entry_id;
         for (size_t i = 3; i + 1 < args.size(); i += 2) {
             entry.fields[args[i]] = args[i + 1];
         }
-        stream_store[stream_key].push_back(entry);
+        entries.push_back(entry);
         return "$" + std::to_string(entry_id.size()) + "\r\n" + entry_id + "\r\n";
     } else if (cmd == "TYPE" && args.size() == 2) {
         std::string key = args[1];
