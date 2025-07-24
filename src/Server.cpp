@@ -10,6 +10,7 @@
 #include <unordered_map>
 #include <chrono>
 #include <algorithm>
+#include <queue>
 #include "RespParser.h"
 #include "CommandHandler.h"
 
@@ -19,6 +20,10 @@ int main(int argc, char **argv) {
   std::unordered_map<std::string, std::chrono::steady_clock::time_point> expiry_store;
   // Store lists for RPUSH
   std::unordered_map<std::string, std::vector<std::string>> list_store;
+  // For each list, a queue of waiting client fds
+  std::unordered_map<std::string, std::queue<int>> blpop_waiting_clients;
+  // For each client fd, the list they are waiting for
+  std::unordered_map<int, std::string> client_waiting_for_list;
   // Flush after every std::cout / std::cerr
   std::cout << std::unitbuf;
   std::cerr << std::unitbuf;
@@ -95,12 +100,70 @@ int main(int argc, char **argv) {
           if (bytes_read <= 0) {
             if (bytes_read < 0) std::cerr << "failed to read from client fd=" << fd << "\n";
             else std::cout << "Client disconnected: fd=" << fd << "\n";
+            // Clean up BLPOP tracking if client disconnects
+            auto it = client_waiting_for_list.find(fd);
+            if (it != client_waiting_for_list.end()) {
+              std::string list_key = it->second;
+              // Remove fd from the waiting queue for this list
+              auto &wait_queue = blpop_waiting_clients[list_key];
+              std::queue<int> new_queue;
+              while (!wait_queue.empty()) {
+                int cur_fd = wait_queue.front(); wait_queue.pop();
+                if (cur_fd != fd) new_queue.push(cur_fd);
+              }
+              wait_queue = std::move(new_queue);
+              client_waiting_for_list.erase(it);
+            }
             close(fd);
             FD_CLR(fd, &master_set);
           } else {
             std::string request(buffer, bytes_read);
             std::vector<std::string> args = RespParser::parseArray(request);
+            // BLPOP handling
+            if (!args.empty() && args[0] == "BLPOP" && args.size() == 3 && args[2] == "0") {
+              std::string list_key = args[1];
+              auto it = list_store.find(list_key);
+              if (it == list_store.end() || it->second.empty()) {
+                // List is empty, block this client
+                blpop_waiting_clients[list_key].push(fd);
+                client_waiting_for_list[fd] = list_key;
+                // Do NOT respond yet
+                continue;
+              } else {
+                // List has elements, pop and respond immediately
+                std::string val = it->second.front();
+                it->second.erase(it->second.begin());
+                std::string resp = "*2\r\n$" + std::to_string(list_key.size()) + "\r\n" + list_key + "\r\n";
+                resp += "$" + std::to_string(val.size()) + "\r\n" + val + "\r\n";
+                if (write(fd, resp.c_str(), resp.size()) < 0) {
+                  std::cerr << "Failed to send response to client fd=" << fd << "\n";
+                  close(fd);
+                  FD_CLR(fd, &master_set);
+                }
+                continue;
+              }
+            }
+            // Normal command handling
             std::string response = handler.handle(args);
+            // After RPUSH/LPUSH, check for blocked BLPOP clients
+            if (!args.empty() && (args[0] == "RPUSH" || args[0] == "LPUSH") && args.size() >= 3) {
+              std::string list_key = args[1];
+              auto &wait_queue = blpop_waiting_clients[list_key];
+              while (!wait_queue.empty() && !list_store[list_key].empty()) {
+                int waiting_fd = wait_queue.front();
+                wait_queue.pop();
+                client_waiting_for_list.erase(waiting_fd);
+                std::string val = list_store[list_key].front();
+                list_store[list_key].erase(list_store[list_key].begin());
+                std::string resp = "*2\r\n$" + std::to_string(list_key.size()) + "\r\n" + list_key + "\r\n";
+                resp += "$" + std::to_string(val.size()) + "\r\n" + val + "\r\n";
+                if (write(waiting_fd, resp.c_str(), resp.size()) < 0) {
+                  std::cerr << "Failed to send response to client fd=" << waiting_fd << "\n";
+                  close(waiting_fd);
+                  FD_CLR(waiting_fd, &master_set);
+                }
+              }
+            }
             if (!response.empty()) {
               if (write(fd, response.c_str(), response.size()) < 0) {
                 std::cerr << "Failed to send response to client fd=" << fd << "\n";
