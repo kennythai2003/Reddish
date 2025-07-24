@@ -488,7 +488,19 @@ int main(int argc, char **argv) {
             
             // INFO replication handling
             if (!args.empty() && cmd_upper == "INFO" && args.size() >= 2 && args[1] == "replication") {
-              std::string info = is_replica ? "role:slave" : "role:master";
+              // Hardcoded 40-char master_replid and offset 0
+              std::string master_replid = "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb";
+              std::string master_repl_offset = "0";
+              std::string info;
+              if (is_replica) {
+                info = "role:slave\n";
+              } else {
+                info = "role:master\n";
+                info += "master_replid:" + master_replid + "\n";
+                info += "master_repl_offset:" + master_repl_offset + "\n";
+              }
+              // Remove trailing newline for RESP length
+              if (!info.empty() && info.back() == '\n') info.pop_back();
               std::string response = "$" + std::to_string(info.size()) + "\r\n" + info + "\r\n";
               if (write(fd, response.c_str(), response.size()) < 0) {
                 std::cerr << "Failed to send response to client fd=" << fd << "\n";
