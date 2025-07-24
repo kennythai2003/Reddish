@@ -24,6 +24,12 @@ std::string CommandHandler::handle(const std::vector<std::string>& args) {
     if (args.empty()) return "-ERR unknown command\r\n";
     std::string cmd = args[0];
     std::transform(cmd.begin(), cmd.end(), cmd.begin(), ::toupper);
+    if (cmd == "LLEN" && args.size() == 2) {
+        std::string key = args[1];
+        auto it = list_store.find(key);
+        int len = (it == list_store.end()) ? 0 : static_cast<int>(it->second.size());
+        return ":" + std::to_string(len) + "\r\n";
+    }
     if (cmd == "PING" && args.size() == 1) {
         return "+PONG\r\n";
     } else if (cmd == "ECHO" && args.size() == 2) {
