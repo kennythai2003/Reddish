@@ -33,6 +33,11 @@ std::string CommandHandler::handle(const std::vector<std::string>& args) {
     if (cmd == "MULTI" && args.size() == 1) {
         return "+OK\r\n";
     }
+    // EXEC command: error if MULTI has not been called (transaction not started)
+    if (cmd == "EXEC" && args.size() == 1) {
+        // Transaction state not tracked yet, always error for now
+        return "-ERR EXEC without MULTI\r\n";
+    }
     // INCR command: key exists and has a numerical value, or key does not exist
     if (cmd == "INCR" && args.size() == 2) {
         std::string key = args[1];
