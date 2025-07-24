@@ -70,11 +70,15 @@ int main(int argc, char **argv) {
     return 1;
   }
   
-  // Parse --port flag if present
+  // Parse --port and --replicaof flags if present
   int port = 6379;
+  bool is_replica = false;
   for (int i = 1; i < argc; ++i) {
     if (std::string(argv[i]) == "--port" && i + 1 < argc) {
       port = std::atoi(argv[i + 1]);
+    }
+    if (std::string(argv[i]) == "--replicaof" && i + 1 < argc) {
+      is_replica = true;
     }
   }
 
@@ -484,7 +488,7 @@ int main(int argc, char **argv) {
             
             // INFO replication handling
             if (!args.empty() && cmd_upper == "INFO" && args.size() >= 2 && args[1] == "replication") {
-              std::string info = "role:master";
+              std::string info = is_replica ? "role:slave" : "role:master";
               std::string response = "$" + std::to_string(info.size()) + "\r\n" + info + "\r\n";
               if (write(fd, response.c_str(), response.size()) < 0) {
                 std::cerr << "Failed to send response to client fd=" << fd << "\n";
