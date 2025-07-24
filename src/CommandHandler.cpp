@@ -3,11 +3,6 @@
 #include <map>
 #include <climits>
 
-// Add a new type for stream entries
-struct StreamEntry {
-    std::string id;
-    std::map<std::string, std::string> fields;
-};
 // Make stream_store a static member that persists across instances
 static std::unordered_map<std::string, std::vector<StreamEntry>> stream_store;
 
