@@ -128,9 +128,28 @@ int main(int argc, char **argv) {
                 std::string port_str2 = std::to_string(port);
                 std::string replconf1 = "*3\r\n$8\r\nREPLCONF\r\n$14\r\nlistening-port\r\n$" + std::to_string(port_str2.size()) + "\r\n" + port_str2 + "\r\n";
                 send(master_fd, replconf1.c_str(), replconf1.size(), 0);
-                // Now send REPLCONF capa psync2
-                std::string replconf2 = "*3\r\n$8\r\nREPLCONF\r\n$4\r\ncapa\r\n$6\r\npsync2\r\n";
-                send(master_fd, replconf2.c_str(), replconf2.size(), 0);
+                // Wait for response to REPLCONF listening-port
+                char resp_buf2[128] = {0};
+                ssize_t n2 = recv(master_fd, resp_buf2, sizeof(resp_buf2)-1, 0);
+                if (n2 > 0) {
+                  std::string resp2(resp_buf2, n2);
+                  if (!resp2.empty() && resp2[0] == '+') {
+                    // Now send REPLCONF capa psync2
+                    std::string replconf2 = "*3\r\n$8\r\nREPLCONF\r\n$4\r\ncapa\r\n$6\r\npsync2\r\n";
+                    send(master_fd, replconf2.c_str(), replconf2.size(), 0);
+                    // Wait for response to REPLCONF capa psync2
+                    char resp_buf3[128] = {0};
+                    ssize_t n3 = recv(master_fd, resp_buf3, sizeof(resp_buf3)-1, 0);
+                    if (n3 > 0) {
+                      std::string resp3(resp_buf3, n3);
+                      if (!resp3.empty() && resp3[0] == '+') {
+                        // Now send PSYNC ? -1
+                        std::string psync = "*3\r\n$5\r\nPSYNC\r\n$1\r\n?\r\n$2\r\n-1\r\n";
+                        send(master_fd, psync.c_str(), psync.size(), 0);
+                      }
+                    }
+                  }
+                }
               }
             }
           }
