@@ -81,10 +81,19 @@ int main(int argc, char **argv) {
     if (std::string(argv[i]) == "--port" && i + 1 < argc) {
       port = std::atoi(argv[i + 1]);
     }
-    if (std::string(argv[i]) == "--replicaof" && i + 2 < argc) {
+    if (std::string(argv[i]) == "--replicaof" && i + 1 < argc) {
       is_replica = true;
-      master_host = argv[i + 1];
-      master_port = std::atoi(argv[i + 2]);
+      std::string arg = argv[i + 1];
+      // Try to split arg into host and port
+      size_t space = arg.find(' ');
+      if (space != std::string::npos) {
+        master_host = arg.substr(0, space);
+        master_port = std::atoi(arg.substr(space + 1).c_str());
+      } else {
+        // fallback: try next arg as port
+        master_host = arg;
+        if (i + 2 < argc) master_port = std::atoi(argv[i + 2]);
+      }
     }
   }
   // If replica, connect to master and send PING handshake
