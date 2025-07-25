@@ -97,16 +97,20 @@ int main(int argc, char **argv) {
       master_fd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
       if (master_fd >= 0) {
         if (connect(master_fd, res->ai_addr, res->ai_addrlen) == 0) {
+          // Set non-blocking (optional for this stage, but safe)
+          int flags = fcntl(master_fd, F_GETFL, 0);
+          if (flags != -1) fcntl(master_fd, F_SETFL, flags | O_NONBLOCK);
           // Send RESP PING: *1\r\n$4\r\nPING\r\n
           std::string ping = "*1\r\n$4\r\nPING\r\n";
           ssize_t sent = send(master_fd, ping.c_str(), ping.size(), 0);
           if (sent < 0) {
             std::cerr << "Failed to send PING to master at " << master_host << ":" << master_port << "\n";
-            close(master_fd);
-            master_fd = -1;
           } else {
             std::cout << "Sent PING to master at " << master_host << ":" << master_port << "\n";
           }
+          // For this stage, close master_fd after sending PING to avoid hanging
+          close(master_fd);
+          master_fd = -1;
         } else {
           std::cerr << "Failed to connect to master at " << master_host << ":" << master_port << "\n";
           close(master_fd);
