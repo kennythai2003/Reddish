@@ -108,9 +108,9 @@ int main(int argc, char **argv) {
       master_fd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
       if (master_fd >= 0) {
         if (connect(master_fd, res->ai_addr, res->ai_addrlen) == 0) {
-          // Set non-blocking (optional for this stage, but safe)
+          // Set master_fd to blocking mode for handshake
           int flags = fcntl(master_fd, F_GETFL, 0);
-          if (flags != -1) fcntl(master_fd, F_SETFL, flags | O_NONBLOCK);
+          if (flags != -1) fcntl(master_fd, F_SETFL, flags & ~O_NONBLOCK);
           // Send RESP PING: *1\r\n$4\r\nPING\r\n
           std::string ping = "*1\r\n$4\r\nPING\r\n";
           ssize_t sent = send(master_fd, ping.c_str(), ping.size(), 0);
