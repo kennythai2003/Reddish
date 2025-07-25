@@ -73,12 +73,51 @@ int main(int argc, char **argv) {
   // Parse --port and --replicaof flags if present
   int port = 6379;
   bool is_replica = false;
+  std::string master_host;
+  int master_port = 0;
   for (int i = 1; i < argc; ++i) {
     if (std::string(argv[i]) == "--port" && i + 1 < argc) {
       port = std::atoi(argv[i + 1]);
     }
-    if (std::string(argv[i]) == "--replicaof" && i + 1 < argc) {
+    if (std::string(argv[i]) == "--replicaof" && i + 2 < argc) {
       is_replica = true;
+      master_host = argv[i + 1];
+      master_port = std::atoi(argv[i + 2]);
+    }
+  }
+  // If replica, connect to master and send PING handshake
+  int master_fd = -1;
+  if (is_replica && !master_host.empty() && master_port > 0) {
+    struct addrinfo hints, *res;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    std::string port_str = std::to_string(master_port);
+    if (getaddrinfo(master_host.c_str(), port_str.c_str(), &hints, &res) == 0) {
+      master_fd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+      if (master_fd >= 0) {
+        if (connect(master_fd, res->ai_addr, res->ai_addrlen) == 0) {
+          // Send RESP PING: *1\r\n$4\r\nPING\r\n
+          std::string ping = "*1\r\n$4\r\nPING\r\n";
+          ssize_t sent = send(master_fd, ping.c_str(), ping.size(), 0);
+          if (sent < 0) {
+            std::cerr << "Failed to send PING to master at " << master_host << ":" << master_port << "\n";
+            close(master_fd);
+            master_fd = -1;
+          } else {
+            std::cout << "Sent PING to master at " << master_host << ":" << master_port << "\n";
+          }
+        } else {
+          std::cerr << "Failed to connect to master at " << master_host << ":" << master_port << "\n";
+          close(master_fd);
+          master_fd = -1;
+        }
+      } else {
+        std::cerr << "Failed to create socket for master connection\n";
+      }
+      freeaddrinfo(res);
+    } else {
+      std::cerr << "getaddrinfo failed for master host " << master_host << ":" << master_port << "\n";
     }
   }
 
