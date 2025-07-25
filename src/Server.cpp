@@ -110,9 +110,7 @@ int main(int argc, char **argv) {
           } else {
             std::cout << "Sent PING to master at " << master_host << ":" << master_port << "\n";
           }
-          // For this stage, close master_fd after sending PING to avoid hanging
-          close(master_fd);
-          master_fd = -1;
+          // Do NOT close master_fd; keep connection open for handshake
         } else {
           std::cerr << "Failed to connect to master at " << master_host << ":" << master_port << "\n";
           close(master_fd);
