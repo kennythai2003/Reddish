@@ -123,7 +123,7 @@ int main(int argc, char **argv) {
             ssize_t n = recv(master_fd, resp_buf, sizeof(resp_buf)-1, 0);
             if (n > 0) {
               std::string resp(resp_buf, n);
-              if (resp.find("+OK\r\n") != std::string::npos) {
+              if (!resp.empty() && resp[0] == '+') {
                 // Send REPLCONF listening-port <PORT>
                 std::string port_str2 = std::to_string(port);
                 std::string replconf1 = "*3\r\n$8\r\nREPLCONF\r\n$14\r\nlistening-port\r\n$" + std::to_string(port_str2.size()) + "\r\n" + port_str2 + "\r\n";
@@ -132,7 +132,7 @@ int main(int argc, char **argv) {
                 n = recv(master_fd, resp_buf, sizeof(resp_buf)-1, 0);
                 if (n > 0) {
                   std::string resp2(resp_buf, n);
-                  if (resp2.find("+OK\r\n") != std::string::npos) {
+                  if (!resp2.empty() && resp2[0] == '+') {
                     // Send REPLCONF capa psync2
                     std::string replconf2 = "*3\r\n$8\r\nREPLCONF\r\n$4\r\ncapa\r\n$6\r\npsync2\r\n";
                     send(master_fd, replconf2.c_str(), replconf2.size(), 0);
