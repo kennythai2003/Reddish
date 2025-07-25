@@ -118,28 +118,13 @@ int main(int argc, char **argv) {
             std::cerr << "Failed to send PING to master at " << master_host << ":" << master_port << "\n";
           } else {
             std::cout << "Sent PING to master at " << master_host << ":" << master_port << "\n";
-            // Wait for +OK\r\n from master (PING response)
-            char resp_buf[128] = {0};
-            ssize_t n = recv(master_fd, resp_buf, sizeof(resp_buf)-1, 0);
-            if (n > 0) {
-              std::string resp(resp_buf, n);
-              if (!resp.empty() && resp[0] == '+') {
-                // Send REPLCONF listening-port <PORT>
-                std::string port_str2 = std::to_string(port);
-                std::string replconf1 = "*3\r\n$8\r\nREPLCONF\r\n$14\r\nlistening-port\r\n$" + std::to_string(port_str2.size()) + "\r\n" + port_str2 + "\r\n";
-                send(master_fd, replconf1.c_str(), replconf1.size(), 0);
-                // Wait for +OK\r\n from master (REPLCONF response)
-                n = recv(master_fd, resp_buf, sizeof(resp_buf)-1, 0);
-                if (n > 0) {
-                  std::string resp2(resp_buf, n);
-                  if (!resp2.empty() && resp2[0] == '+') {
-                    // Send REPLCONF capa psync2
-                    std::string replconf2 = "*3\r\n$8\r\nREPLCONF\r\n$4\r\ncapa\r\n$6\r\npsync2\r\n";
-                    send(master_fd, replconf2.c_str(), replconf2.size(), 0);
-                  }
-                }
-              }
-            }
+            // Immediately send REPLCONF listening-port <PORT>
+            std::string port_str2 = std::to_string(port);
+            std::string replconf1 = "*3\r\n$8\r\nREPLCONF\r\n$14\r\nlistening-port\r\n$" + std::to_string(port_str2.size()) + "\r\n" + port_str2 + "\r\n";
+            send(master_fd, replconf1.c_str(), replconf1.size(), 0);
+            // Immediately send REPLCONF capa psync2
+            std::string replconf2 = "*3\r\n$8\r\nREPLCONF\r\n$4\r\ncapa\r\n$6\r\npsync2\r\n";
+            send(master_fd, replconf2.c_str(), replconf2.size(), 0);
           }
         } else {
           std::cerr << "Failed to connect to master at " << master_host << ":" << master_port << "\n";
