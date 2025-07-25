@@ -12,6 +12,8 @@
 #include <algorithm>
 #include <queue>
 #include <vector>
+
+#include <fcntl.h>
 #include <tuple>
 
 #include "RespParser.h"
