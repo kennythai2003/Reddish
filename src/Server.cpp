@@ -345,6 +345,16 @@ int main(int argc, char **argv) {
               std::transform(cmd_upper.begin(), cmd_upper.end(), cmd_upper.begin(), ::toupper);
             }
 
+            // REPLCONF handshake support (master side)
+            if (!args.empty() && cmd_upper == "REPLCONF") {
+              std::string response = "+OK\r\n";
+              if (write(fd, response.c_str(), response.size()) < 0) {
+                std::cerr << "Failed to send response to client fd=" << fd << "\n";
+                close(fd);
+                FD_CLR(fd, &master_set);
+              }
+              continue;
+            }
             // Transaction support: MULTI/EXEC
             if (!args.empty() && cmd_upper == "MULTI") {
               client_in_multi[fd] = true;
