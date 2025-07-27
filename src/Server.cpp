@@ -355,6 +355,17 @@ int main(int argc, char **argv) {
               }
               continue;
             }
+            // PSYNC handshake support (master side)
+            if (args.size() == 3 && cmd_upper == "PSYNC" && args[1] == "?" && args[2] == "-1") {
+              std::string replid = "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb";
+              std::string response = "+FULLRESYNC " + replid + " 0\r\n";
+              if (write(fd, response.c_str(), response.size()) < 0) {
+                std::cerr << "Failed to send response to client fd=" << fd << "\n";
+                close(fd);
+                FD_CLR(fd, &master_set);
+              }
+              continue;
+            }
             // Transaction support: MULTI/EXEC
             if (!args.empty() && cmd_upper == "MULTI") {
               client_in_multi[fd] = true;
