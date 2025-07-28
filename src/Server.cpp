@@ -516,12 +516,12 @@ int main(int argc, char **argv) {
               // Special handling for INFO replication
               if (cmd_upper == "INFO" && args.size() == 2 && args[1] == "replication") {
                 // Minimal valid INFO replication response
-                // role: always master for now
-                // connected_slaves: number of replicas
+                std::string role = is_replica ? "slave" : "master";
+                std::string connected_slaves = is_replica ? "0" : std::to_string(replica_fds.size());
                 response =
                   "# Replication\r\n"
-                  "role:master\r\n"
-                  "connected_slaves:" + std::to_string(replica_fds.size()) + "\r\n"
+                  "role:" + role + "\r\n"
+                  "connected_slaves:" + connected_slaves + "\r\n"
                   "master_replid:8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb\r\n"
                   "master_repl_offset:0\r\n";
                 response = "$" + std::to_string(response.size()) + "\r\n" + response + "\r\n";
