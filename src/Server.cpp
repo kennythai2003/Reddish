@@ -181,29 +181,34 @@ int main(int argc, char **argv) {
                   ssize_t r = recv(master_fd, buf, sizeof(buf), 0);
                   if (r <= 0) break;
                   leftover.append(buf, r);
-                  // Parse as many RESP arrays as possible
+                  // Parse as many RESP arrays as possible, but only if fully available
                   size_t pos = 0;
                   while (pos < leftover.size()) {
-                    // Try to parse a RESP array
                     size_t arr_start = leftover.find('*', pos);
                     if (arr_start == std::string::npos) break;
                     size_t rn = leftover.find("\r\n", arr_start);
                     if (rn == std::string::npos) break;
-                    int n_args = std::stoi(leftover.substr(arr_start + 1, rn - arr_start - 1));
+                    int n_args = 0;
+                    try {
+                      n_args = std::stoi(leftover.substr(arr_start + 1, rn - arr_start - 1));
+                    } catch (...) { pos = arr_start + 1; continue; }
                     std::vector<std::string> args;
                     size_t cur = rn + 2;
-                    bool parse_fail = false;
+                    bool incomplete = false;
                     for (int i = 0; i < n_args; ++i) {
-                      if (cur >= leftover.size() || leftover[cur] != '$') { parse_fail = true; break; }
+                      if (cur >= leftover.size() || leftover[cur] != '$') { incomplete = true; break; }
                       size_t rn1 = leftover.find("\r\n", cur);
-                      if (rn1 == std::string::npos) { parse_fail = true; break; }
-                      int arglen = std::stoi(leftover.substr(cur + 1, rn1 - cur - 1));
+                      if (rn1 == std::string::npos) { incomplete = true; break; }
+                      int arglen = 0;
+                      try {
+                        arglen = std::stoi(leftover.substr(cur + 1, rn1 - cur - 1));
+                      } catch (...) { incomplete = true; break; }
                       size_t start = rn1 + 2;
-                      if (start + arglen > leftover.size()) { parse_fail = true; break; }
+                      if (start + arglen > leftover.size()) { incomplete = true; break; }
                       args.push_back(leftover.substr(start, arglen));
-                      cur = start + arglen + 2; // skip \r\n
+                      cur = start + arglen + 2;
                     }
-                    if (parse_fail) break;
+                    if (incomplete) break; // Wait for more data
                     // Apply the command to local state (no response)
                     CommandHandler handler(kv_store, expiry_store, list_store);
                     handler.handle(args);
