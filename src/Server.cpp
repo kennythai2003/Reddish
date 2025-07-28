@@ -565,8 +565,73 @@ int main(int argc, char **argv) {
                   client_multi_queue[fd].push_back(args);
                   response = "+QUEUED\r\n";
                 } else {
-                  // Special handling for INFO replication
-                  if (cmd_upper == "INFO" && args.size() == 2 && args[1] == "replication") {
+                  // Special handling for XREAD BLOCK 0 ... $
+                  if (cmd_upper == "XREAD") {
+                    // Look for BLOCK 0 and streams ... $
+                    bool is_block = false;
+                    std::vector<std::string> stream_keys;
+                    std::vector<std::string> last_ids;
+                    for (size_t i = 1; i + 1 < args.size(); ++i) {
+                      if (args[i] == "BLOCK" && args[i+1] == "0") {
+                        is_block = true;
+                      }
+                    }
+                    // Find "streams" keyword
+                    auto it = std::find(args.begin(), args.end(), "streams");
+                    if (it != args.end()) {
+                      size_t idx = it - args.begin();
+                      // After "streams" comes N keys, then N ids
+                      size_t n_streams = (args.size() - idx - 1) / 2;
+                      for (size_t j = 0; j < n_streams; ++j) {
+                        stream_keys.push_back(args[idx + 1 + j]);
+                        last_ids.push_back(args[idx + 1 + n_streams + j]);
+                      }
+                    }
+                    bool can_fulfill = false;
+                    std::vector<std::string> found_stream;
+                    std::vector<std::string> found_id;
+                    std::vector<std::vector<std::string>> found_fields;
+                    // Check if any stream has a new entry after the requested id
+                    for (size_t i = 0; i < stream_keys.size(); ++i) {
+                      const std::string& key = stream_keys[i];
+                      const std::string& last_id = last_ids[i];
+                      auto sit = stream_store.find(key);
+                      if (sit != stream_store.end()) {
+                        for (const auto& entry : sit->second) {
+                          if (last_id == "$" || entry.id > last_id) {
+                            can_fulfill = true;
+                            found_stream.push_back(key);
+                            found_id.push_back(entry.id);
+                            found_fields.push_back(entry.fields);
+                            break;
+                          }
+                        }
+                      }
+                    }
+                    if (can_fulfill) {
+                      // Return the first available entry in RESP array format
+                      response = "*1\r\n";
+                      response += "*2\r\n";
+                      response += "$" + std::to_string(found_stream[0].size()) + "\r\n" + found_stream[0] + "\r\n";
+                      response += "*1\r\n";
+                      response += "*2\r\n";
+                      response += "$" + std::to_string(found_id[0].size()) + "\r\n" + found_id[0] + "\r\n";
+                      // fields: even number, alternating key/value
+                      std::string field_resp = "*" + std::to_string(found_fields[0].size()) + "\r\n";
+                      for (const auto& f : found_fields[0]) {
+                        field_resp += "$" + std::to_string(f.size()) + "\r\n" + f + "\r\n";
+                      }
+                      response += field_resp;
+                    } else if (is_block) {
+                      // Add to xread_waiting_clients
+                      xread_waiting_clients.push_back({fd, Clock::now(), 0, stream_keys, last_ids});
+                      // Do not send a response now
+                      continue;
+                    } else {
+                      // Not blocking, return empty array
+                      response = "*0\r\n";
+                    }
+                  } else if (cmd_upper == "INFO" && args.size() == 2 && args[1] == "replication") {
                     std::string role = is_replica ? "slave" : "master";
                     std::string connected_slaves = is_replica ? "0" : std::to_string(replica_fds.size());
                     response =
@@ -627,6 +692,52 @@ int main(int argc, char **argv) {
                       close(rfd);
                       FD_CLR(rfd, &master_set);
                       it = replica_fds.erase(it);
+                    } else {
+                      ++it;
+                    }
+                  }
+                }
+                // Unblock XREAD clients if new XADD
+                if (cmd_upper == "XADD") {
+                  // For each waiting client, check if their stream is this one and if a new entry is available
+                  auto it = xread_waiting_clients.begin();
+                  while (it != xread_waiting_clients.end()) {
+                    bool fulfilled = false;
+                    for (size_t i = 0; i < it->stream_keys.size(); ++i) {
+                      if (it->stream_keys[i] == args[1]) { // args[1] is stream key
+                        // Find entry with id > last_ids[i]
+                        auto sit = stream_store.find(args[1]);
+                        if (sit != stream_store.end()) {
+                          for (const auto& entry : sit->second) {
+                            if (it->last_ids[i] == "$" || entry.id > it->last_ids[i]) {
+                              // Build RESP array for this entry
+                              std::string resp = "*1\r\n";
+                              resp += "*2\r\n";
+                              resp += "$" + std::to_string(args[1].size()) + "\r\n" + args[1] + "\r\n";
+                              resp += "*1\r\n";
+                              resp += "*2\r\n";
+                              resp += "$" + std::to_string(entry.id.size()) + "\r\n" + entry.id + "\r\n";
+                              std::string field_resp = "*" + std::to_string(entry.fields.size()) + "\r\n";
+                              for (const auto& f : entry.fields) {
+                                field_resp += "$" + std::to_string(f.size()) + "\r\n" + f + "\r\n";
+                              }
+                              resp += field_resp;
+                              ssize_t sent = write(it->fd, resp.c_str(), resp.size());
+                              if (sent < 0) {
+                                std::cerr << "Failed to send XREAD unblock to fd=" << it->fd << std::endl;
+                              }
+                              close(it->fd);
+                              FD_CLR(it->fd, &master_set);
+                              fulfilled = true;
+                              break;
+                            }
+                          }
+                        }
+                      }
+                      if (fulfilled) break;
+                    }
+                    if (fulfilled) {
+                      it = xread_waiting_clients.erase(it);
                     } else {
                       ++it;
                     }
