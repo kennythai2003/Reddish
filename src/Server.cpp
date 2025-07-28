@@ -218,6 +218,11 @@ int main(int argc, char **argv) {
                   std::cout << "  '" << kv.first << "' => '" << kv.second << "'" << std::endl;
                 }
               }
+              // Close master_fd after sync so it is not included in the event loop
+              if (master_fd >= 0) {
+                close(master_fd);
+                master_fd = -1;
+              }
             }
           }
         } else {
