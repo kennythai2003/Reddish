@@ -208,8 +208,7 @@ int main(int argc, char **argv) {
     } else {
       std::cerr << "getaddrinfo failed for master host " << master_host << ":" << master_port << "\n";
     }
-    // After this, exit (replica only processes master connection)
-    return 0;
+    // After this, continue running the server to accept client connections
   }
 
   struct sockaddr_in server_addr;
