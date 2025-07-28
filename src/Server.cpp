@@ -390,6 +390,7 @@ int main(int argc, char **argv) {
             std::string& buf = client_buffers[fd];
             size_t pos = 0;
             while (pos < buf.size()) {
+              std::cout << "[DEBUG] fd=" << fd << " buffer: '" << buf.substr(pos) << "'\n";
               // Try to find a RESP array
               size_t arr_start = buf.find('*', pos);
               if (arr_start == std::string::npos) break;
@@ -398,7 +399,7 @@ int main(int argc, char **argv) {
               int n_args = 0;
               try {
                 n_args = std::stoi(buf.substr(arr_start + 1, rn - arr_start - 1));
-              } catch (...) { break; }
+              } catch (...) { pos = arr_start + 1; continue; }
               std::vector<std::string> args;
               size_t cur = rn + 2;
               bool parse_fail = false;
@@ -415,7 +416,11 @@ int main(int argc, char **argv) {
                 args.push_back(buf.substr(start, arglen));
                 cur = start + arglen + 2; // skip \r\n
               }
-              if (parse_fail) break;
+              if (parse_fail) {
+                // Skip to next '*' to avoid infinite loop
+                pos = arr_start + 1;
+                continue;
+              }
               // Convert command to uppercase for comparison
               std::string cmd_upper;
               if (!args.empty()) {
