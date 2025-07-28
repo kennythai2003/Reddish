@@ -512,8 +512,23 @@ int main(int argc, char **argv) {
                 std::cout << std::endl;
                 
                 // Process the command and send response back to client
+              std::string response;
+              // Special handling for INFO replication
+              if (cmd_upper == "INFO" && args.size() == 2 && args[1] == "replication") {
+                // Minimal valid INFO replication response
+                // role: always master for now
+                // connected_slaves: number of replicas
+                response =
+                  "# Replication\r\n"
+                  "role:master\r\n"
+                  "connected_slaves:" + std::to_string(replica_fds.size()) + "\r\n"
+                  "master_replid:8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb\r\n"
+                  "master_repl_offset:0\r\n";
+                response = "$" + std::to_string(response.size()) + "\r\n" + response + "\r\n";
+              } else {
                 CommandHandler handler(kv_store, expiry_store, list_store);
-                std::string response = handler.handle(args);
+                response = handler.handle(args);
+              }
                 
                 std::cout << "[CLIENT] Sending response: " << response.substr(0, 50);
                 if (response.length() > 50) std::cout << "...";
