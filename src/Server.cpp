@@ -728,24 +728,20 @@ int main(int argc, char **argv) {
                         if (sit != stream_store.end() && !sit->second.empty()) {
                           // Only unblock if stream grew since block (for $)
                           bool should_unblock = false;
-                          size_t entry_idx = sit->second.size() - 1; // default to last
                           if (it->last_ids[i] == "$") {
                             // Only unblock if stream grew
                             if (sit->second.size() > it->stream_lengths_at_block[i]) {
                               should_unblock = true;
-                              // For $ blocking, return the first new entry after block
-                              entry_idx = it->stream_lengths_at_block[i];
                             }
                           } else {
                             // For explicit IDs, unblock if new entry's id > last_id
                             const auto& entry = sit->second.back();
                             if (entry.id > it->last_ids[i]) {
                               should_unblock = true;
-                              entry_idx = sit->second.size() - 1;
                             }
                           }
                           if (should_unblock) {
-                            const auto& entry = sit->second[entry_idx];
+                            const auto& entry = sit->second.back();
                             std::string resp = "*1\r\n";
                             resp += "*2\r\n";
                             resp += "$" + std::to_string(args[1].size()) + "\r\n" + args[1] + "\r\n";
