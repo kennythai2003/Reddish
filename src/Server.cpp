@@ -37,12 +37,9 @@ struct XreadWaiter {
     double timeout; // seconds, 0 means infinite
     std::vector<std::string> stream_keys;
     std::vector<std::string> last_ids;
-    std::vector<size_t> stream_lengths_at_block; // For $ blocking, track stream length at block time
 };
 
 int main(int argc, char **argv) {
-  // Per-client input buffers for partial reads
-  std::unordered_map<int, std::string> client_buffers;
   // Track all connected replica fds
   std::vector<int> replica_fds;
   std::unordered_map<std::string, std::string> kv_store;
@@ -101,26 +98,8 @@ int main(int argc, char **argv) {
       }
     }
   }
-
-  // Always bind and listen before any replica handshake, so server is ready for clients
-  struct sockaddr_in server_addr;
-  server_addr.sin_family = AF_INET;
-  server_addr.sin_addr.s_addr = INADDR_ANY;
-  server_addr.sin_port = htons(port);
-
-  if (bind(server_fd, (struct sockaddr *) &server_addr, sizeof(server_addr)) != 0) {
-    std::cerr << "Failed to bind to port " << port << "\n";
-    return 1;
-  }
-  int connection_backlog = 5;
-  if (listen(server_fd, connection_backlog) != 0) {
-    std::cerr << "listen failed\n";
-    return 1;
-  }
-
   // If replica, connect to master and send PING handshake
   int master_fd = -1;
-  std::string master_leftover; // Buffer for partial reads from master
   if (is_replica && !master_host.empty() && master_port > 0) {
     struct addrinfo hints, *res;
     memset(&hints, 0, sizeof(hints));
@@ -131,55 +110,49 @@ int main(int argc, char **argv) {
       master_fd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
       if (master_fd >= 0) {
         if (connect(master_fd, res->ai_addr, res->ai_addrlen) == 0) {
+          // Set master_fd to blocking mode for handshake
           int flags = fcntl(master_fd, F_GETFL, 0);
           if (flags != -1) fcntl(master_fd, F_SETFL, flags & ~O_NONBLOCK);
-          // Handshake
+          // Send RESP PING: *1\r\n$4\r\nPING\r\n
           std::string ping = "*1\r\n$4\r\nPING\r\n";
-          send(master_fd, ping.c_str(), ping.size(), 0);
-          char resp_buf[128] = {0};
-          ssize_t n = recv(master_fd, resp_buf, sizeof(resp_buf)-1, 0);
-          if (n > 0 && resp_buf[0] == '+') {
-            std::string port_str2 = std::to_string(port);
-            std::string replconf1 = "*3\r\n$8\r\nREPLCONF\r\n$14\r\nlistening-port\r\n$" + std::to_string(port_str2.size()) + "\r\n" + port_str2 + "\r\n";
-            send(master_fd, replconf1.c_str(), replconf1.size(), 0);
-            char resp_buf2[128] = {0};
-            ssize_t n2 = recv(master_fd, resp_buf2, sizeof(resp_buf2)-1, 0);
-            if (n2 > 0 && resp_buf2[0] == '+') {
-              std::string replconf2 = "*3\r\n$8\r\nREPLCONF\r\n$4\r\ncapa\r\n$6\r\npsync2\r\n";
-              send(master_fd, replconf2.c_str(), replconf2.size(), 0);
-              char resp_buf3[128] = {0};
-              ssize_t n3 = recv(master_fd, resp_buf3, sizeof(resp_buf3)-1, 0);
-              if (n3 > 0 && resp_buf3[0] == '+') {
-                std::string psync = "*3\r\n$5\r\nPSYNC\r\n$1\r\n?\r\n$2\r\n-1\r\n";
-                send(master_fd, psync.c_str(), psync.size(), 0);
-                // Wait for FULLRESYNC and RDB bulk string
-                std::string rdb_data;
-                bool rdb_done = false;
-                while (!rdb_done) {
-                  char buf[4096];
-                  ssize_t r = recv(master_fd, buf, sizeof(buf), 0);
-                  if (r <= 0) break;
-                  rdb_data.append(buf, r);
-                  // Look for end of RDB bulk string: $<len>\r\n...<binary>...
-                  size_t dollar = rdb_data.find('$');
-                  if (dollar != std::string::npos) {
-                    size_t rn = rdb_data.find("\r\n", dollar);
-                    if (rn != std::string::npos) {
-                      size_t len = std::stoul(rdb_data.substr(dollar + 1, rn - dollar - 1));
-                      size_t start = rn + 2;
-                      if (rdb_data.size() >= start + len) {
-                        // RDB file received, skip it
-                        rdb_data = rdb_data.substr(start + len);
-                        rdb_done = true;
-                        break;
+          ssize_t sent = send(master_fd, ping.c_str(), ping.size(), 0);
+          if (sent < 0) {
+            std::cerr << "Failed to send PING to master at " << master_host << ":" << master_port << "\n";
+          } else {
+            std::cout << "Sent PING to master at " << master_host << ":" << master_port << "\n";
+            // Wait for a response from master (PONG or any RESP simple string)
+            char resp_buf[128] = {0};
+            ssize_t n = recv(master_fd, resp_buf, sizeof(resp_buf)-1, 0);
+            if (n > 0) {
+              std::string resp(resp_buf, n);
+              if (!resp.empty() && resp[0] == '+') {
+                // Now send REPLCONF listening-port <PORT>
+                std::string port_str2 = std::to_string(port);
+                std::string replconf1 = "*3\r\n$8\r\nREPLCONF\r\n$14\r\nlistening-port\r\n$" + std::to_string(port_str2.size()) + "\r\n" + port_str2 + "\r\n";
+                send(master_fd, replconf1.c_str(), replconf1.size(), 0);
+                // Wait for response to REPLCONF listening-port
+                char resp_buf2[128] = {0};
+                ssize_t n2 = recv(master_fd, resp_buf2, sizeof(resp_buf2)-1, 0);
+                if (n2 > 0) {
+                  std::string resp2(resp_buf2, n2);
+                  if (!resp2.empty() && resp2[0] == '+') {
+                    // Now send REPLCONF capa psync2
+                    std::string replconf2 = "*3\r\n$8\r\nREPLCONF\r\n$4\r\ncapa\r\n$6\r\npsync2\r\n";
+                    send(master_fd, replconf2.c_str(), replconf2.size(), 0);
+                    // Wait for response to REPLCONF capa psync2
+                    char resp_buf3[128] = {0};
+                    ssize_t n3 = recv(master_fd, resp_buf3, sizeof(resp_buf3)-1, 0);
+                    if (n3 > 0) {
+                      std::string resp3(resp_buf3, n3);
+                      if (!resp3.empty() && resp3[0] == '+') {
+                        // Now send PSYNC ? -1
+                        std::string psync = "*3\r\n$5\r\nPSYNC\r\n$1\r\n?\r\n$2\r\n-1\r\n";
+                        send(master_fd, psync.c_str(), psync.size(), 0);
                       }
                     }
                   }
                 }
-              // Save any leftover data after RDB for event loop processing
-              master_leftover = rdb_data;
-              // Do NOT close master_fd; keep it open for event loop
-            }
+              }
             }
           }
         } else {
@@ -194,9 +167,23 @@ int main(int argc, char **argv) {
     } else {
       std::cerr << "getaddrinfo failed for master host " << master_host << ":" << master_port << "\n";
     }
-    // After this, continue running the server to accept client connections
   }
 
+  struct sockaddr_in server_addr;
+  server_addr.sin_family = AF_INET;
+  server_addr.sin_addr.s_addr = INADDR_ANY;
+  server_addr.sin_port = htons(port);
+
+  if (bind(server_fd, (struct sockaddr *) &server_addr, sizeof(server_addr)) != 0) {
+    std::cerr << "Failed to bind to port " << port << "\n";
+    return 1;
+  }
+  
+  int connection_backlog = 5;
+  if (listen(server_fd, connection_backlog) != 0) {
+    std::cerr << "listen failed\n";
+    return 1;
+  }
   
   struct sockaddr_in client_addr;
   int client_addr_len = sizeof(client_addr);
@@ -209,10 +196,6 @@ int main(int argc, char **argv) {
   int fd_max = server_fd;
   FD_ZERO(&master_set);
   FD_SET(server_fd, &master_set);
-  if (master_fd >= 0) {
-    FD_SET(master_fd, &master_set);
-    if (master_fd > fd_max) fd_max = master_fd;
-  }
 
   std::cout << "Server event loop started. Waiting for clients...\n";
 
@@ -222,7 +205,6 @@ int main(int argc, char **argv) {
   std::unordered_map<int, std::vector<std::vector<std::string>>> client_multi_queue;
   // For this stage, we only need to track if MULTI was called, not queue commands
   while (true) {
-    // ...removed debug output...
     read_fds = master_set;
     // Compute select timeout for BLPOP and XREAD
     timeval *timeout_ptr = nullptr;
@@ -311,7 +293,7 @@ int main(int argc, char **argv) {
     for (int fd = 0; fd <= fd_max; ++fd) {
       if (FD_ISSET(fd, &read_fds)) {
         if (fd == server_fd) {
-          // ...existing code for new client connection...
+          // New client connection
           int new_client_fd = accept(server_fd, (struct sockaddr *)&client_addr, (socklen_t *)&client_addr_len);
           if (new_client_fd < 0) {
             std::cerr << "Failed to accept client connection\n";
@@ -319,126 +301,15 @@ int main(int argc, char **argv) {
           }
           FD_SET(new_client_fd, &master_set);
           if (new_client_fd > fd_max) fd_max = new_client_fd;
-          std::cout << "[DEBUG] Client connected: fd=" << new_client_fd << ", fd_max now " << fd_max << std::endl;
-        } else if (is_replica && fd == master_fd) {
-          // Data from master (as replica) - UPDATED SECTION
-          char buffer[4096] = {0};
-          int bytes_read = read(master_fd, buffer, sizeof(buffer));
-          if (bytes_read <= 0) {
-            std::cerr << "Master connection closed or error\n";
-            close(master_fd);
-            FD_CLR(master_fd, &master_set);
-            master_fd = -1;
-            continue;
-          }
-          
-          // Append to master buffer
-          master_leftover.append(buffer, bytes_read);
-          
-          // Parse as many complete RESP arrays as possible
-          size_t pos = 0;
-          while (pos < master_leftover.size()) {
-            // Look for start of array
-            size_t arr_start = master_leftover.find('*', pos);
-            if (arr_start == std::string::npos) break;
-            
-            // Parse array count
-            size_t rn = master_leftover.find("\r\n", arr_start);
-            if (rn == std::string::npos) break; // Need more data
-            
-            int n_args = 0;
-            try {
-              n_args = std::stoi(master_leftover.substr(arr_start + 1, rn - arr_start - 1));
-            } catch (...) { 
-              pos = arr_start + 1; 
-              continue; 
-            }
-            
-            if (n_args <= 0) {
-              pos = rn + 2;
-              continue;
-            }
-            
-            // Parse each argument
-            std::vector<std::string> args;
-            size_t cur = rn + 2;
-            bool parse_complete = true;
-            
-            for (int i = 0; i < n_args; ++i) {
-              // Expect bulk string: $<length>\r\n<data>\r\n
-              if (cur >= master_leftover.size() || master_leftover[cur] != '$') {
-                parse_complete = false;
-                break;
-              }
-              
-              // Find length line ending
-              size_t len_end = master_leftover.find("\r\n", cur);
-              if (len_end == std::string::npos) {
-                parse_complete = false;
-                break;
-              }
-              
-              // Parse length
-              int arglen = 0;
-              try {
-                arglen = std::stoi(master_leftover.substr(cur + 1, len_end - cur - 1));
-              } catch (...) {
-                parse_complete = false;
-                break;
-              }
-              
-              // Check if we have enough data for the argument
-              size_t data_start = len_end + 2;
-              if (data_start + arglen + 2 > master_leftover.size()) {
-                parse_complete = false;
-                break;
-              }
-              
-              // Extract argument
-              args.push_back(master_leftover.substr(data_start, arglen));
-              cur = data_start + arglen + 2; // Skip past \r\n
-            }
-            
-            if (!parse_complete) {
-              // Not enough data for complete command, wait for more
-              break;
-            }
-            
-            // We have a complete command, process it
-            if (!args.empty()) {
-              std::cout << "[REPLICA] Processing command from master: " << args[0];
-              for (size_t i = 1; i < args.size(); ++i) {
-                std::cout << " " << args[i];
-              }
-              std::cout << std::endl;
-              
-              // Apply the command to local state (no response sent back to master)
-              CommandHandler handler(kv_store, expiry_store, list_store);
-              std::string response = handler.handle(args);
-              
-              // For debugging: log what the response would have been
-              std::cout << "[REPLICA] Command processed, response would be: " << response.substr(0, 50);
-              if (response.length() > 50) std::cout << "...";
-              std::cout << std::endl;
-            }
-            
-            // Move to next command
-            pos = cur;
-          }
-          
-          // Remove processed data from buffer
-          if (pos > 0) {
-            master_leftover = master_leftover.substr(pos);
-          }
+          std::cout << "Client connected: fd=" << new_client_fd << "\n";
         } else {
-          // ...existing code for client data...
+          // Data from existing client
           char buffer[1024] = {0};
           int bytes_read = read(fd, buffer, sizeof(buffer));
           if (bytes_read <= 0) {
-            // ...existing code for client disconnect...
             if (bytes_read < 0) std::cerr << "failed to read from client fd=" << fd << "\n";
             else std::cout << "Client disconnected: fd=" << fd << "\n";
-            // ...existing code for cleaning up client state...
+            // Clean up BLPOP tracking if client disconnects
             auto it = client_waiting_for_list.find(fd);
             if (it != client_waiting_for_list.end()) {
               std::string list_key = it->second;
@@ -452,6 +323,7 @@ int main(int argc, char **argv) {
               client_waiting_for_list.erase(it);
               client_waiting_time.erase(fd);
             }
+            // Clean up XREAD tracking if client disconnects
             auto xread_it = xread_waiting_clients.begin();
             while (xread_it != xread_waiting_clients.end()) {
               if (xread_it->fd == fd) {
@@ -460,339 +332,410 @@ int main(int argc, char **argv) {
                 ++xread_it;
               }
             }
+            // Clean up MULTI state
             client_in_multi.erase(fd);
-            client_buffers.erase(fd);
             close(fd);
             FD_CLR(fd, &master_set);
           } else {
-            // ...existing code for client buffer and command handling...
-            client_buffers[fd].append(buffer, bytes_read);
-            std::string& buf = client_buffers[fd];
-            size_t pos = 0;
-            while (pos < buf.size()) {
-              // ...existing code for parsing and handling RESP arrays from client...
-              size_t arr_start = buf.find('*', pos);
-              if (arr_start == std::string::npos) break;
-              size_t rn = buf.find("\r\n", arr_start);
-              if (rn == std::string::npos) break;
-              int n_args = 0;
-              try {
-                n_args = std::stoi(buf.substr(arr_start + 1, rn - arr_start - 1));
-              } catch (...) { pos = arr_start + 1; continue; }
-              std::vector<std::string> args;
-              size_t cur = rn + 2;
-              bool parse_fail = false;
-              for (int i = 0; i < n_args; ++i) {
-                if (cur >= buf.size() || buf[cur] != '$') { parse_fail = true; break; }
-                size_t rn1 = buf.find("\r\n", cur);
-                if (rn1 == std::string::npos) { parse_fail = true; break; }
-                int arglen = 0;
-                try {
-                  arglen = std::stoi(buf.substr(cur + 1, rn1 - cur - 1));
-                } catch (...) { parse_fail = true; break; }
-                size_t start = rn1 + 2;
-                if (start + arglen > buf.size()) { parse_fail = true; break; }
-                args.push_back(buf.substr(start, arglen));
-                cur = start + arglen + 2; // skip \r\n
+            std::string request(buffer, bytes_read);
+            std::vector<std::string> args = RespParser::parseArray(request);
+            
+            // Convert command to uppercase for comparison
+            std::string cmd_upper;
+            if (!args.empty()) {
+              cmd_upper = args[0];
+              std::transform(cmd_upper.begin(), cmd_upper.end(), cmd_upper.begin(), ::toupper);
+            }
+
+            // REPLCONF handshake support (master side)
+            if (!args.empty() && cmd_upper == "REPLCONF") {
+              std::string response = "+OK\r\n";
+              if (write(fd, response.c_str(), response.size()) < 0) {
+                std::cerr << "Failed to send response to client fd=" << fd << "\n";
+                close(fd);
+                FD_CLR(fd, &master_set);
               }
-              if (parse_fail) {
-                pos = arr_start + 1;
+              continue;
+            }
+            // PSYNC handshake support (master side)
+            if (args.size() == 3 && cmd_upper == "PSYNC" && args[1] == "?" && args[2] == "-1") {
+              std::string replid = "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb";
+              std::string response = "+FULLRESYNC " + replid + " 0\r\n";
+              if (write(fd, response.c_str(), response.size()) < 0) {
+                std::cerr << "Failed to send response to client fd=" << fd << "\n";
+                close(fd);
+                FD_CLR(fd, &master_set);
                 continue;
               }
-              std::string cmd_upper;
-              if (!args.empty()) {
-                cmd_upper = args[0];
-                std::transform(cmd_upper.begin(), cmd_upper.end(), cmd_upper.begin(), ::toupper);
+              // Use a valid empty RDB file as a std::string, as in the reference code
+              const std::string empty_rdb =
+                "\x52\x45\x44\x49\x53\x30\x30\x31\x31\xfa\x09\x72\x65\x64\x69\x73\x2d\x76\x65\x72\x05\x37\x2e\x32\x2e\x30\xfa\x0a\x72\x65\x64\x69\x73\x2d\x62\x69\x74\x73\xc0\x40\xfa\x05\x63\x74\x69\x6d\x65\xc2\x6d\x08\xbc\x65\xfa\x08\x75\x73\x65\x64\x2d\x6d\x65\x6d\xc2\xb0\xc4\x10\x00\xfa\x08\x61\x6f\x66\x2d\x62\x61\x73\x65\xc0\x00\xff\xf0\x6e\x3b\xfe\xc0\xff\x5a\xa2";
+              std::string rdb_header = "$" + std::to_string(empty_rdb.length()) + "\r\n";
+              if (write(fd, rdb_header.c_str(), rdb_header.size()) < 0) {
+                std::cerr << "Failed to send RDB header to client fd=" << fd << "\n";
+                close(fd);
+                FD_CLR(fd, &master_set);
+                continue;
               }
-              // Handle client commands
-              if (!args.empty()) {
-                std::cout << "[CLIENT] Processing command: " << args[0];
-                for (size_t i = 1; i < args.size(); ++i) {
-                  std::cout << " " << args[i];
-                }
-                std::cout << std::endl;
-
-                std::string response;
-                // Transaction logic
-                if (cmd_upper == "MULTI") {
-                  client_in_multi[fd] = true;
-                  client_multi_queue[fd].clear();
-                  response = "+OK\r\n";
-                } else if (cmd_upper == "EXEC") {
-                  if (client_in_multi[fd]) {
-                    // Execute all queued commands and return RESP array
-                    std::vector<std::vector<std::string>> &queue = client_multi_queue[fd];
-                    CommandHandler handler(kv_store, expiry_store, list_store);
-                    response = "*" + std::to_string(queue.size()) + "\r\n";
-                    for (const auto& qargs : queue) {
-                      std::string r = handler.handle(qargs);
-                      // Remove trailing \r\n for each response if present
-                      if (!r.empty() && r.back() == '\n') {
-                        size_t p = r.rfind("\r\n");
-                        if (p != std::string::npos && p == r.size() - 2) {
-                          r = r.substr(0, r.size() - 2);
-                        }
-                      }
-                      // If response starts with '+', return as bulk string
-                      if (!r.empty() && r[0] == '+') {
-                        std::string val = r.substr(1); // skip +
-                        response += "$" + std::to_string(val.size()) + "\r\n" + val + "\r\n";
-                      } else if (!r.empty() && r[0] == '$') {
-                        // Already bulk string
-                        response += r + "\r\n";
-                      } else if (!r.empty() && r[0] == ':') {
-                        // Integer
-                        response += r + "\r\n";
-                      } else {
-                        // Fallback
-                        response += r + "\r\n";
-                      }
-                    }
-                    client_in_multi[fd] = false;
-                    client_multi_queue[fd].clear();
-                  } else {
-                    response = "-ERR EXEC without MULTI\r\n";
-                  }
-                } else if (cmd_upper == "DISCARD") {
-                  if (client_in_multi[fd]) {
-                    client_in_multi[fd] = false;
-                    client_multi_queue[fd].clear();
-                    response = "+OK\r\n";
-                  } else {
-                    response = "-ERR DISCARD without MULTI\r\n";
-                  }
-                } else if (client_in_multi[fd]) {
-                  // Inside MULTI, queue the command and reply QUEUED
-                  client_multi_queue[fd].push_back(args);
-                  response = "+QUEUED\r\n";
-                } else {
-                  // Special handling for XREAD BLOCK 0 ... $
-                  if (cmd_upper == "XREAD") {
-                    // Look for BLOCK 0 and streams ... $
-                    bool is_block = false;
-                    std::vector<std::string> stream_keys;
-                    std::vector<std::string> last_ids;
-                    std::vector<size_t> stream_lengths_at_block;
-                    for (size_t i = 1; i + 1 < args.size(); ++i) {
-                      if (args[i] == "BLOCK" && args[i+1] == "0") {
-                        is_block = true;
-                      }
-                    }
-                    // Find "streams" keyword
-                    auto it = std::find(args.begin(), args.end(), "streams");
-                    if (it != args.end()) {
-                      size_t idx = it - args.begin();
-                      // After "streams" comes N keys, then N ids
-                      size_t n_streams = (args.size() - idx - 1) / 2;
-                      for (size_t j = 0; j < n_streams; ++j) {
-                        stream_keys.push_back(args[idx + 1 + j]);
-                        last_ids.push_back(args[idx + 1 + n_streams + j]);
-                        // For $ blocking, record stream length at block time
-                        if (args[idx + 1 + n_streams + j] == "$") {
-                          auto sit = stream_store.find(args[idx + 1 + j]);
-                          if (sit != stream_store.end()) {
-                            stream_lengths_at_block.push_back(sit->second.size());
-                          } else {
-                            stream_lengths_at_block.push_back(0);
-                          }
-                        } else {
-                          stream_lengths_at_block.push_back(0); // Not used for non-$
-                        }
-                      }
-                    }
-                    bool can_fulfill = false;
-                    std::vector<std::string> found_stream;
-                    std::vector<std::string> found_id;
-                    std::vector<std::vector<std::string>> found_fields;
-                    // Check if any stream has a new entry after the requested id
-                    for (size_t i = 0; i < stream_keys.size(); ++i) {
-                      const std::string& key = stream_keys[i];
-                      const std::string& last_id = last_ids[i];
-                      auto sit = stream_store.find(key);
-                      if (sit != stream_store.end()) {
-                        if (last_id == "$") {
-                          // If last_id is $, do not return any entry immediately (must block)
-                          continue;
-                        } else {
-                          for (const auto& entry : sit->second) {
-                            if (entry.id > last_id) {
-                              can_fulfill = true;
-                              found_stream.push_back(key);
-                              found_id.push_back(entry.id);
-                              // Convert map to vector<string> alternating key/value
-                              std::vector<std::string> kv_fields;
-                              for (const auto& kv : entry.fields) {
-                                kv_fields.push_back(kv.first);
-                                kv_fields.push_back(kv.second);
-                              }
-                              found_fields.push_back(kv_fields);
-                              break;
-                            }
-                          }
-                        }
-                      }
-                    }
-                    if (can_fulfill) {
-                      // Return the first available entry in RESP array format
-                      response = "*1\r\n";
-                      response += "*2\r\n";
-                      response += "$" + std::to_string(found_stream[0].size()) + "\r\n" + found_stream[0] + "\r\n";
-                      response += "*1\r\n";
-                      response += "*2\r\n";
-                      response += "$" + std::to_string(found_id[0].size()) + "\r\n" + found_id[0] + "\r\n";
-                      // fields: even number, alternating key/value
-                      std::string field_resp = "*" + std::to_string(found_fields[0].size()) + "\r\n";
-                      for (const auto& f : found_fields[0]) {
-                        field_resp += "$" + std::to_string(f.size()) + "\r\n" + f + "\r\n";
-                      }
-                      response += field_resp;
-                    } else if (is_block) {
-                      // Add to xread_waiting_clients, with stream_lengths_at_block
-                      xread_waiting_clients.push_back({fd, Clock::now(), 0, stream_keys, last_ids, stream_lengths_at_block});
-                      // Do not send a response now
-                      continue;
-                    } else {
-                      // Not blocking, return empty array
-                      response = "*0\r\n";
-                    }
-                  } else if (cmd_upper == "INFO" && args.size() == 2 && args[1] == "replication") {
-                    std::string role = is_replica ? "slave" : "master";
-                    std::string connected_slaves = is_replica ? "0" : std::to_string(replica_fds.size());
-                    response =
-                      "# Replication\r\n"
-                      "role:" + role + "\r\n"
-                      "connected_slaves:" + connected_slaves + "\r\n"
-                      "master_replid:8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb\r\n"
-                      "master_repl_offset:0\r\n";
-                    response = "$" + std::to_string(response.size()) + "\r\n" + response + "\r\n";
-                  } else {
-                    CommandHandler handler(kv_store, expiry_store, list_store);
-                    response = handler.handle(args);
-                  }
-                }
-
-                std::cout << "[CLIENT] Sending response: " << response.substr(0, 50);
-                if (response.length() > 50) std::cout << "...";
-                std::cout << std::endl;
-
-                // Send response back to client
-                ssize_t sent = write(fd, response.c_str(), response.size());
-                if (sent < 0) {
-                  std::cerr << "Failed to send response to client fd=" << fd << std::endl;
-                }
-
-                // Special handling for PSYNC - send RDB file after FULLRESYNC response
-                std::string cmd_upper2 = args[0];
-                std::transform(cmd_upper2.begin(), cmd_upper2.end(), cmd_upper2.begin(), ::toupper);
-                if (cmd_upper2 == "PSYNC" && args.size() == 3) {
-                  // Send empty RDB file after FULLRESYNC response
-                  std::string rdb_content = "REDIS0011\xfa\tredis-ver\x057.2.0\xfa\nredis-bits\xc0@\xfa\x05ctime\xc2m\b\xbce\xfa\bused-mem\xb0\xc4\x10\x00\xfa\baof-base\xc0\x00\xff\xf0n;\xfe\xc0\xffZ\xa2";
-                  std::string rdb_header = "$" + std::to_string(rdb_content.size()) + "\r\n";
-                  std::string full_rdb = rdb_header + rdb_content;
-
-                  ssize_t rdb_sent = write(fd, full_rdb.c_str(), full_rdb.size());
-                  if (rdb_sent < 0) {
-                    std::cerr << "Failed to send RDB file to replica fd=" << fd << std::endl;
-                  } else {
-                    std::cout << "[MASTER] Sent RDB file to replica fd=" << fd << std::endl;
-                    // Track this fd as a replica for future command propagation
-                    replica_fds.push_back(fd);
-                  }
-                }
-                // Propagate write commands to all replicas
-                static const std::vector<std::string> write_cmds = {"SET", "RPUSH", "LPUSH", "XADD", "INCR", "DEL"};
-                if (std::find(write_cmds.begin(), write_cmds.end(), cmd_upper) != write_cmds.end() && !replica_fds.empty() && !client_in_multi[fd]) {
-                  // Reconstruct the original RESP command
-                  std::string resp_cmd = "*" + std::to_string(args.size()) + "\r\n";
-                  for (const auto& arg : args) {
-                    resp_cmd += "$" + std::to_string(arg.size()) + "\r\n" + arg + "\r\n";
-                  }
-                  // Send to all replicas
-                  for (auto it = replica_fds.begin(); it != replica_fds.end(); ) {
-                    int rfd = *it;
-                    ssize_t w = write(rfd, resp_cmd.c_str(), resp_cmd.size());
-                    if (w < 0) {
-                      std::cerr << "Failed to propagate to replica fd=" << rfd << ", removing from list." << std::endl;
-                      close(rfd);
-                      FD_CLR(rfd, &master_set);
-                      it = replica_fds.erase(it);
-                    } else {
-                      ++it;
-                    }
-                  }
-                }
-                // Unblock XREAD clients if new XADD
-                if (cmd_upper == "XADD") {
-                  // For each waiting client, check if their stream is this one and if a new entry is available
-                  auto it = xread_waiting_clients.begin();
-                  while (it != xread_waiting_clients.end()) {
-                    bool fulfilled = false;
-                    for (size_t i = 0; i < it->stream_keys.size(); ++i) {
-                      if (it->stream_keys[i] == args[1]) { // args[1] is stream key
-                        auto sit = stream_store.find(args[1]);
-                        if (sit != stream_store.end() && !sit->second.empty()) {
-                          // Find the correct entry to return
-                          const StreamEntry* entry_to_return = nullptr;
-                          if (it->last_ids[i] == "$") {
-                            // Only unblock if stream grew
-                            if (sit->second.size() > it->stream_lengths_at_block[i]) {
-                              // The new entry is at index stream_lengths_at_block[i]
-                              if (sit->second.size() > it->stream_lengths_at_block[i]) {
-                                entry_to_return = &sit->second[it->stream_lengths_at_block[i]];
-                              }
-                            }
-                          } else {
-                            // For explicit IDs, unblock if new entry's id > last_id
-                            for (const auto& entry : sit->second) {
-                              if (entry.id > it->last_ids[i]) {
-                                entry_to_return = &entry;
-                                break;
-                              }
-                            }
-                          }
-                          if (entry_to_return) {
-                            std::cout << "[DEBUG] Unblocking XREAD client fd=" << it->fd << " for stream '" << args[1] << "' with entry id=" << entry_to_return->id << std::endl;
-                            std::string resp = "*1\r\n";
-                            resp += "*2\r\n";
-                            resp += "$" + std::to_string(args[1].size()) + "\r\n" + args[1] + "\r\n";
-                            resp += "*1\r\n";
-                            resp += "*2\r\n";
-                            resp += "$" + std::to_string(entry_to_return->id.size()) + "\r\n" + entry_to_return->id + "\r\n";
-                            // Convert map to vector<string> alternating key/value
-                            std::vector<std::string> kv_fields;
-                            for (const auto& kv : entry_to_return->fields) {
-                              kv_fields.push_back(kv.first);
-                              kv_fields.push_back(kv.second);
-                            }
-                            std::string field_resp = "*" + std::to_string(kv_fields.size()) + "\r\n";
-                            for (const auto& f : kv_fields) {
-                              field_resp += "$" + std::to_string(f.size()) + "\r\n" + f + "\r\n";
-                            }
-                            resp += field_resp;
-                            ssize_t sent = write(it->fd, resp.c_str(), resp.size());
-                            if (sent < 0) {
-                              std::cerr << "Failed to send XREAD unblock to fd=" << it->fd << std::endl;
-                            }
-                            close(it->fd);
-                            FD_CLR(it->fd, &master_set);
-                            fulfilled = true;
-                            break;
-                          }
-                        }
-                      }
-                      if (fulfilled) break;
-                    }
-                    if (fulfilled) {
-                      it = xread_waiting_clients.erase(it);
-                    } else {
-                      ++it;
-                    }
-                  }
-                }
+              if (write(fd, empty_rdb.data(), empty_rdb.length()) < 0) {
+                std::cerr << "Failed to send RDB body to client fd=" << fd << "\n";
+                close(fd);
+                FD_CLR(fd, &master_set);
+                continue;
               }
-              pos = cur;
+              // Add this fd to the list of replica connections
+              replica_fds.push_back(fd);
+              continue;
             }
-            if (pos > 0) buf = buf.substr(pos);
+            // Transaction support: MULTI/EXEC
+            if (!args.empty() && cmd_upper == "MULTI") {
+              client_in_multi[fd] = true;
+              client_multi_queue[fd].clear();
+              std::string response = "+OK\r\n";
+              if (write(fd, response.c_str(), response.size()) < 0) {
+                std::cerr << "Failed to send response to client fd=" << fd << "\n";
+                close(fd);
+                FD_CLR(fd, &master_set);
+              }
+              continue;
+            }
+            if (!args.empty() && client_in_multi.count(fd) && client_in_multi[fd] && cmd_upper != "EXEC") {
+              // DISCARD should not be queued, handle immediately
+              if (cmd_upper == "DISCARD") {
+                client_in_multi[fd] = false;
+                client_multi_queue[fd].clear();
+                std::string response = "+OK\r\n";
+                if (write(fd, response.c_str(), response.size()) < 0) {
+                  std::cerr << "Failed to send response to client fd=" << fd << "\n";
+                  close(fd);
+                  FD_CLR(fd, &master_set);
+                }
+                continue;
+              } else {
+                // Queue command, respond with +QUEUED, do not execute
+                client_multi_queue[fd].push_back(args);
+                std::string response = "+QUEUED\r\n";
+                if (write(fd, response.c_str(), response.size()) < 0) {
+                  std::cerr << "Failed to send response to client fd=" << fd << "\n";
+                  close(fd);
+                  FD_CLR(fd, &master_set);
+                }
+                continue;
+              }
+            }
+            if (!args.empty() && cmd_upper == "EXEC") {
+              if (client_in_multi.count(fd) && client_in_multi[fd]) {
+                // Execute queued commands, collect responses (including errors)
+                std::vector<std::string> responses;
+                for (const auto& qargs : client_multi_queue[fd]) {
+                  CommandHandler handler(kv_store, expiry_store, list_store);
+                  std::string resp = handler.handle(qargs);
+                  // If response is empty, treat as null bulk string
+                  if (resp.empty()) {
+                    responses.push_back("$-1\r\n");
+                  } else if (!resp.empty() && resp[0] == '-') {
+                    // Error response, keep as is
+                    responses.push_back(resp);
+                  } else {
+                    responses.push_back(resp);
+                  }
+                }
+                // RESP array of responses
+                std::string response = "*" + std::to_string(responses.size()) + "\r\n";
+                for (const auto& r : responses) {
+                  response += r;
+                }
+                client_in_multi[fd] = false;
+                client_multi_queue[fd].clear();
+                if (write(fd, response.c_str(), response.size()) < 0) {
+                  std::cerr << "Failed to send response to client fd=" << fd << "\n";
+                  close(fd);
+                  FD_CLR(fd, &master_set);
+                }
+              } else {
+                std::string response = "-ERR EXEC without MULTI\r\n";
+                if (write(fd, response.c_str(), response.size()) < 0) {
+                  std::cerr << "Failed to send response to client fd=" << fd << "\n";
+                  close(fd);
+                  FD_CLR(fd, &master_set);
+                }
+              }
+              continue;
+            }
+            
+            // DISCARD handling
+            if (!args.empty() && cmd_upper == "DISCARD") {
+              if (client_in_multi.count(fd) && client_in_multi[fd]) {
+                client_in_multi[fd] = false;
+                client_multi_queue[fd].clear();
+                std::string response = "+OK\r\n";
+                if (write(fd, response.c_str(), response.size()) < 0) {
+                  std::cerr << "Failed to send response to client fd=" << fd << "\n";
+                  close(fd);
+                  FD_CLR(fd, &master_set);
+                }
+              } else {
+                std::string response = "-ERR DISCARD without MULTI\r\n";
+                if (write(fd, response.c_str(), response.size()) < 0) {
+                  std::cerr << "Failed to send response to client fd=" << fd << "\n";
+                  close(fd);
+                  FD_CLR(fd, &master_set);
+                }
+              }
+              continue;
+            }
+            
+            // BLPOP handling
+            if (!args.empty() && cmd_upper == "BLPOP" && args.size() == 3) {
+              std::string list_key = args[1];
+              double timeout = 0;
+              try { timeout = std::stod(args[2]); } catch (...) { timeout = 0; }
+              auto it = list_store.find(list_key);
+              if (it == list_store.end() || it->second.empty()) {
+                // List is empty, block this client
+                BlpopWaiter w{fd, Clock::now(), timeout};
+                blpop_waiting_clients[list_key].push(w);
+                client_waiting_for_list[fd] = list_key;
+                client_waiting_time[fd] = std::make_pair(w.start, timeout);
+                continue;
+              } else {
+                // List has elements, pop and respond immediately
+                std::string val = it->second.front();
+                it->second.erase(it->second.begin());
+                std::string resp = "*2\r\n$" + std::to_string(list_key.size()) + "\r\n" + list_key + "\r\n";
+                resp += "$" + std::to_string(val.size()) + "\r\n" + val + "\r\n";
+                if (write(fd, resp.c_str(), resp.size()) < 0) {
+                  std::cerr << "Failed to send response to client fd=" << fd << "\n";
+                  close(fd);
+                  FD_CLR(fd, &master_set);
+                }
+                continue;
+              }
+            }
+            
+            // XREAD blocking handling
+            if (!args.empty() && args.size() >= 4) {
+              if (cmd_upper == "XREAD" && args[1] == "block") {
+                double timeout = 0;
+                try { timeout = std::stod(args[2]) / 1000.0; } catch (...) { timeout = 0; } // Convert ms to seconds
+
+                if (args[3] != "streams") {
+                  std::string response = "-ERR syntax error\r\n";
+                  if (write(fd, response.c_str(), response.size()) < 0) {
+                    std::cerr << "Failed to send response to client fd=" << fd << "\n";
+                    close(fd);
+                    FD_CLR(fd, &master_set);
+                  }
+                  continue;
+                }
+
+                // Parse streams and IDs
+                int n_streams = (args.size() - 4) / 2;
+                if ((args.size() - 4) % 2 != 0 || n_streams < 1) {
+                  std::string response = "-ERR wrong number of arguments for 'XREAD' command\r\n";
+                  if (write(fd, response.c_str(), response.size()) < 0) {
+                    std::cerr << "Failed to send response to client fd=" << fd << "\n";
+                    close(fd);
+                    FD_CLR(fd, &master_set);
+                  }
+                  continue;
+                }
+
+                std::vector<std::string> stream_keys;
+                std::vector<std::string> last_ids;
+                for (int i = 4; i < 4 + n_streams; ++i) {
+                  stream_keys.push_back(args[i]);
+                }
+                for (int i = 4 + n_streams; i < 4 + 2 * n_streams; ++i) {
+                  last_ids.push_back(args[i]);
+                }
+
+                // If $ is passed as the ID, replace it with the highest ID in the stream at the time of blocking
+                for (int s = 0; s < n_streams; ++s) {
+                  if (last_ids[s] == "$") {
+                    auto it = stream_store.find(stream_keys[s]);
+                    if (it != stream_store.end() && !it->second.empty()) {
+                      last_ids[s] = it->second.back().id;
+                    } else {
+                      last_ids[s] = "0-0";
+                    }
+                  }
+                }
+
+                // Check if there are already new entries
+                std::vector<std::string> xread_args = {"XREAD", "streams"};
+                xread_args.insert(xread_args.end(), stream_keys.begin(), stream_keys.end());
+                xread_args.insert(xread_args.end(), last_ids.begin(), last_ids.end());
+
+                CommandHandler check_handler(kv_store, expiry_store, list_store);
+                std::string response = check_handler.handle(xread_args);
+
+                // Debug output
+                std::cout << "XREAD check response: " << response << std::endl;
+
+                // Check if response contains actual data (not empty streams)
+                bool has_data = false;
+                // Count how many streams have non-zero entries
+                size_t pos = 0;
+                for (int i = 0; i < n_streams; ++i) {
+                  // Find pattern: stream_name followed by entries array
+                  std::string stream_name = stream_keys[i];
+                  std::string stream_pattern = "$" + std::to_string(stream_name.size()) + "\r\n" + stream_name + "\r\n*";
+                  size_t stream_pos = response.find(stream_pattern, pos);
+                  if (stream_pos != std::string::npos) {
+                    // Extract the number after the last '*'
+                    size_t count_start = stream_pos + stream_pattern.size();
+                    size_t count_end = response.find("\r\n", count_start);
+                    if (count_end != std::string::npos) {
+                      std::string count_str = response.substr(count_start, count_end - count_start);
+                      if (count_str != "0") {
+                        has_data = true;
+                        break;
+                      }
+                    }
+                    pos = count_end;
+                  }
+                }
+
+                if (has_data) {
+                  // Send immediate response
+                  if (write(fd, response.c_str(), response.size()) < 0) {
+                    std::cerr << "Failed to send response to client fd=" << fd << "\n";
+                    close(fd);
+                    FD_CLR(fd, &master_set);
+                  }
+                } else {
+                  // Block this client, storing the resolved last_ids
+                  XreadWaiter w{fd, Clock::now(), timeout, stream_keys, last_ids};
+                  xread_waiting_clients.push_back(w);
+                }
+                continue;
+              }
+            }
+            
+            // INFO replication handling
+            if (!args.empty() && cmd_upper == "INFO" && args.size() >= 2 && args[1] == "replication") {
+              // Hardcoded 40-char master_replid and offset 0
+              std::string master_replid = "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb";
+              std::string master_repl_offset = "0";
+              std::string info;
+              if (is_replica) {
+                info = "role:slave\n";
+              } else {
+                info = "role:master\n";
+                info += "master_replid:" + master_replid + "\n";
+                info += "master_repl_offset:" + master_repl_offset + "\n";
+              }
+              // Remove trailing newline for RESP length
+              if (!info.empty() && info.back() == '\n') info.pop_back();
+              std::string response = "$" + std::to_string(info.size()) + "\r\n" + info + "\r\n";
+              if (write(fd, response.c_str(), response.size()) < 0) {
+                std::cerr << "Failed to send response to client fd=" << fd << "\n";
+                close(fd);
+                FD_CLR(fd, &master_set);
+              }
+              continue;
+            }
+            
+            // Normal command handling
+            CommandHandler handler(kv_store, expiry_store, list_store);
+            std::string response = handler.handle(args);
+
+            // Propagate write commands to replica if connected
+            // Only propagate if not from a replica itself
+            static const std::vector<std::string> write_cmds = {"SET", "DEL", "LPUSH", "RPUSH", "EXPIRE", "PEXPIRE", "INCR", "DECR", "XADD"};
+            if (!args.empty() && !cmd_upper.empty() && std::find(write_cmds.begin(), write_cmds.end(), cmd_upper) != write_cmds.end()) {
+              // Reconstruct the RESP array for the command
+              std::string resp = "*" + std::to_string(args.size()) + "\r\n";
+              for (const auto& arg : args) {
+                resp += "$" + std::to_string(arg.size()) + "\r\n" + arg + "\r\n";
+              }
+              // Send to all replicas except the sender
+              for (auto it = replica_fds.begin(); it != replica_fds.end(); ) {
+                int rfd = *it;
+                if (rfd == fd) { ++it; continue; }
+                if (write(rfd, resp.c_str(), resp.size()) < 0) {
+                  std::cerr << "Failed to propagate to replica fd=" << rfd << "\n";
+                  // Remove closed/broken replica fds
+                  close(rfd);
+                  FD_CLR(rfd, &master_set);
+                  it = replica_fds.erase(it);
+                } else {
+                  ++it;
+                }
+              }
+            }
+            
+            // After RPUSH/LPUSH, check for blocked BLPOP clients
+            if (!args.empty() && (cmd_upper == "RPUSH" || cmd_upper == "LPUSH") && args.size() >= 3) {
+              std::string list_key = args[1];
+              auto &wait_queue = blpop_waiting_clients[list_key];
+              std::queue<BlpopWaiter> new_queue;
+              while (!wait_queue.empty() && !list_store[list_key].empty()) {
+                BlpopWaiter w = wait_queue.front(); wait_queue.pop();
+                client_waiting_for_list.erase(w.fd);
+                client_waiting_time.erase(w.fd);
+                std::string val = list_store[list_key].front();
+                list_store[list_key].erase(list_store[list_key].begin());
+                std::string resp = "*2\r\n$" + std::to_string(list_key.size()) + "\r\n" + list_key + "\r\n";
+                resp += "$" + std::to_string(val.size()) + "\r\n" + val + "\r\n";
+                if (write(w.fd, resp.c_str(), resp.size()) < 0) {
+                  std::cerr << "Failed to send response to client fd=" << w.fd << "\n";
+                  close(w.fd);
+                  FD_CLR(w.fd, &master_set);
+                }
+              }
+              wait_queue = std::move(new_queue);
+            }
+            
+            // After XADD, check for blocked XREAD clients
+            if (!args.empty() && cmd_upper == "XADD" && args.size() >= 5) {
+              std::string stream_key = args[1];
+              std::cout << "XADD detected for stream: " << stream_key << ", checking " << xread_waiting_clients.size() << " waiting clients\n";
+              
+              auto xread_it = xread_waiting_clients.begin();
+              while (xread_it != xread_waiting_clients.end()) {
+                XreadWaiter& w = *xread_it;
+                bool stream_matches = false;
+                for (const std::string& key : w.stream_keys) {
+                  if (key == stream_key) {
+                    stream_matches = true;
+                    break;
+                  }
+                }
+                
+                if (stream_matches) {
+                  std::cout << "Found matching client for stream " << stream_key << ", fd=" << w.fd << std::endl;
+                  // Generate XREAD response for this client
+                  std::vector<std::string> xread_args = {"XREAD", "streams"};
+                  xread_args.insert(xread_args.end(), w.stream_keys.begin(), w.stream_keys.end());
+                  xread_args.insert(xread_args.end(), w.last_ids.begin(), w.last_ids.end());
+                  
+                  CommandHandler xread_handler(kv_store, expiry_store, list_store);
+                  std::string xread_response = xread_handler.handle(xread_args);
+                  
+                  std::cout << "Sending XREAD response: " << xread_response << std::endl;
+                  
+                  if (write(w.fd, xread_response.c_str(), xread_response.size()) < 0) {
+                    std::cerr << "Failed to send response to client fd=" << w.fd << "\n";
+                    close(w.fd);
+                    FD_CLR(w.fd, &master_set);
+                  }
+                  
+                  xread_it = xread_waiting_clients.erase(xread_it);
+                } else {
+                  ++xread_it;
+                }
+              }
+            }
+            
+            if (!response.empty()) {
+              if (write(fd, response.c_str(), response.size()) < 0) {
+                std::cerr << "Failed to send response to client fd=" << fd << "\n";
+                close(fd);
+                FD_CLR(fd, &master_set);
+              }
+            }
           }
         }
       }
