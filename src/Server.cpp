@@ -445,6 +445,16 @@ int main(int argc, char **argv) {
               cmd_upper = args[0];
               std::transform(cmd_upper.begin(), cmd_upper.end(), cmd_upper.begin(), ::toupper);
             }
+            // Handle REPLCONF handshake from replicas
+            if (!args.empty() && cmd_upper == "REPLCONF") {
+              std::string response = "+OK\r\n";
+              if (write(fd, response.c_str(), response.size()) < 0) {
+                std::cerr << "Failed to send response to client fd=" << fd << "\n";
+                close(fd);
+                FD_CLR(fd, &master_set);
+              }
+              continue;
+            }
             // Normal command handling for clients
             CommandHandler handler(kv_store, expiry_store, list_store);
             std::string response = handler.handle(args);
