@@ -756,9 +756,16 @@ int main(int argc, char **argv) {
                   FD_CLR(fd, &master_set);
                 }
               } else {
+                // Always send a valid RESP response, even if CommandHandler returns empty
+                std::string null_resp = "$-1\r\n";
                 std::cout << "No response generated for client fd=" << fd << " (command: ";
                 for (const auto& a : args) std::cout << a << " ";
-                std::cout << ")\n";
+                std::cout << ") -- sending RESP Null Bulk String" << std::endl;
+                if (write(fd, null_resp.c_str(), null_resp.size()) < 0) {
+                  std::cerr << "Failed to send null response to client fd=" << fd << "\n";
+                  close(fd);
+                  FD_CLR(fd, &master_set);
+                }
               }
               pos = cur;
             }
