@@ -40,6 +40,8 @@ struct XreadWaiter {
 };
 
 int main(int argc, char **argv) {
+  // Per-client input buffers for partial reads
+  std::unordered_map<int, std::string> client_buffers;
   // Track all connected replica fds
   std::vector<int> replica_fds;
   std::unordered_map<std::string, std::string> kv_store;
@@ -378,18 +380,364 @@ int main(int argc, char **argv) {
             }
             // Clean up MULTI state
             client_in_multi.erase(fd);
+            client_buffers.erase(fd);
             close(fd);
             FD_CLR(fd, &master_set);
           } else {
-            std::string request(buffer, bytes_read);
-            std::vector<std::string> args = RespParser::parseArray(request);
-            
-            // Convert command to uppercase for comparison
-            std::string cmd_upper;
-            if (!args.empty()) {
-              cmd_upper = args[0];
-              std::transform(cmd_upper.begin(), cmd_upper.end(), cmd_upper.begin(), ::toupper);
+            // Accumulate data in per-client buffer
+            client_buffers[fd].append(buffer, bytes_read);
+            // Try to parse as many RESP arrays as possible
+            std::string& buf = client_buffers[fd];
+            size_t pos = 0;
+            while (pos < buf.size()) {
+              // Try to find a RESP array
+              size_t arr_start = buf.find('*', pos);
+              if (arr_start == std::string::npos) break;
+              size_t rn = buf.find("\r\n", arr_start);
+              if (rn == std::string::npos) break;
+              int n_args = 0;
+              try {
+                n_args = std::stoi(buf.substr(arr_start + 1, rn - arr_start - 1));
+              } catch (...) { break; }
+              std::vector<std::string> args;
+              size_t cur = rn + 2;
+              bool parse_fail = false;
+              for (int i = 0; i < n_args; ++i) {
+                if (cur >= buf.size() || buf[cur] != '$') { parse_fail = true; break; }
+                size_t rn1 = buf.find("\r\n", cur);
+                if (rn1 == std::string::npos) { parse_fail = true; break; }
+                int arglen = 0;
+                try {
+                  arglen = std::stoi(buf.substr(cur + 1, rn1 - cur - 1));
+                } catch (...) { parse_fail = true; break; }
+                size_t start = rn1 + 2;
+                if (start + arglen > buf.size()) { parse_fail = true; break; }
+                args.push_back(buf.substr(start, arglen));
+                cur = start + arglen + 2; // skip \r\n
+              }
+              if (parse_fail) break;
+              // Convert command to uppercase for comparison
+              std::string cmd_upper;
+              if (!args.empty()) {
+                cmd_upper = args[0];
+                std::transform(cmd_upper.begin(), cmd_upper.end(), cmd_upper.begin(), ::toupper);
+              }
+              // ...existing command handling code...
+              // (Copy all command handling logic here, replacing the old args/cmd_upper block)
+              // For brevity, we will call the existing command handling block here:
+              // ---- BEGIN EXISTING COMMAND HANDLING ----
+              // REPLCONF handshake support (master side)
+              if (!args.empty() && cmd_upper == "REPLCONF") {
+                std::string response = "+OK\r\n";
+                if (write(fd, response.c_str(), response.size()) < 0) {
+                  std::cerr << "Failed to send response to client fd=" << fd << "\n";
+                  close(fd);
+                  FD_CLR(fd, &master_set);
+                }
+                pos = cur;
+                continue;
+              }
+              // PSYNC handshake support (master side)
+              if (args.size() == 3 && cmd_upper == "PSYNC" && args[1] == "?" && args[2] == "-1") {
+                std::string replid = "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb";
+                std::string response = "+FULLRESYNC " + replid + " 0\r\n";
+                if (write(fd, response.c_str(), response.size()) < 0) {
+                  std::cerr << "Failed to send response to client fd=" << fd << "\n";
+                  close(fd);
+                  FD_CLR(fd, &master_set);
+                  pos = cur;
+                  continue;
+                }
+                // Use a valid empty RDB file as a std::string, as in the reference code
+                const std::string empty_rdb =
+                  "\x52\x45\x44\x49\x53\x30\x30\x31\x31\xfa\x09\x72\x65\x64\x69\x73\x2d\x76\x65\x72\x05\x37\x2e\x32\x2e\x30\xfa\x0a\x72\x65\x64\x69\x73\x2d\x62\x69\x74\x73\xc0\x40\xfa\x05\x63\x74\x69\x6d\x65\xc2\x6d\x08\xbc\x65\xfa\x08\x75\x73\x65\x64\x2d\x6d\x65\x6d\xc2\xb0\xc4\x10\x00\xfa\x08\x61\x6f\x66\x2d\x62\x61\x73\x65\xc0\x00\xff\xf0\x6e\x3b\xfe\xc0\xff\x5a\xa2";
+                std::string rdb_header = "$" + std::to_string(empty_rdb.length()) + "\r\n";
+                if (write(fd, rdb_header.c_str(), rdb_header.size()) < 0) {
+                  std::cerr << "Failed to send RDB header to client fd=" << fd << "\n";
+                  close(fd);
+                  FD_CLR(fd, &master_set);
+                  pos = cur;
+                  continue;
+                }
+                if (write(fd, empty_rdb.data(), empty_rdb.length()) < 0) {
+                  std::cerr << "Failed to send RDB body to client fd=" << fd << "\n";
+                  close(fd);
+                  FD_CLR(fd, &master_set);
+                  pos = cur;
+                  continue;
+                }
+                // Add this fd to the list of replica connections
+                replica_fds.push_back(fd);
+                pos = cur;
+                continue;
+              }
+              // ...existing code for MULTI/EXEC, BLPOP, XREAD, INFO, normal command handling, propagation, etc...
+              // For brevity, after handling, always advance pos = cur;
+              // Transaction support: MULTI/EXEC
+              if (!args.empty() && cmd_upper == "MULTI") {
+                client_in_multi[fd] = true;
+                client_multi_queue[fd].clear();
+                std::string response = "+OK\r\n";
+                if (write(fd, response.c_str(), response.size()) < 0) {
+                  std::cerr << "Failed to send response to client fd=" << fd << "\n";
+                  close(fd);
+                  FD_CLR(fd, &master_set);
+                }
+                pos = cur;
+                continue;
+              }
+              if (!args.empty() && client_in_multi.count(fd) && client_in_multi[fd] && cmd_upper != "EXEC") {
+                if (cmd_upper == "DISCARD") {
+                  client_in_multi[fd] = false;
+                  client_multi_queue[fd].clear();
+                  std::string response = "+OK\r\n";
+                  if (write(fd, response.c_str(), response.size()) < 0) {
+                    std::cerr << "Failed to send response to client fd=" << fd << "\n";
+                    close(fd);
+                    FD_CLR(fd, &master_set);
+                  }
+                  pos = cur;
+                  continue;
+                } else {
+                  client_multi_queue[fd].push_back(args);
+                  std::string response = "+QUEUED\r\n";
+                  if (write(fd, response.c_str(), response.size()) < 0) {
+                    std::cerr << "Failed to send response to client fd=" << fd << "\n";
+                    close(fd);
+                    FD_CLR(fd, &master_set);
+                  }
+                  pos = cur;
+                  continue;
+                }
+              }
+              if (!args.empty() && cmd_upper == "EXEC") {
+                if (client_in_multi.count(fd) && client_in_multi[fd]) {
+                  std::vector<std::string> responses;
+                  for (const auto& qargs : client_multi_queue[fd]) {
+                    CommandHandler handler(kv_store, expiry_store, list_store);
+                    std::string resp = handler.handle(qargs);
+                    if (resp.empty()) {
+                      responses.push_back("$-1\r\n");
+                    } else if (!resp.empty() && resp[0] == '-') {
+                      responses.push_back(resp);
+                    } else {
+                      responses.push_back(resp);
+                    }
+                  }
+                  std::string response = "*" + std::to_string(responses.size()) + "\r\n";
+                  for (const auto& r : responses) {
+                    response += r;
+                  }
+                  client_in_multi[fd] = false;
+                  client_multi_queue[fd].clear();
+                  if (write(fd, response.c_str(), response.size()) < 0) {
+                    std::cerr << "Failed to send response to client fd=" << fd << "\n";
+                    close(fd);
+                    FD_CLR(fd, &master_set);
+                  }
+                } else {
+                  std::string response = "-ERR EXEC without MULTI\r\n";
+                  if (write(fd, response.c_str(), response.size()) < 0) {
+                    std::cerr << "Failed to send response to client fd=" << fd << "\n";
+                    close(fd);
+                    FD_CLR(fd, &master_set);
+                  }
+                }
+                pos = cur;
+                continue;
+              }
+              // DISCARD handling
+              if (!args.empty() && cmd_upper == "DISCARD") {
+                if (client_in_multi.count(fd) && client_in_multi[fd]) {
+                  client_in_multi[fd] = false;
+                  client_multi_queue[fd].clear();
+                  std::string response = "+OK\r\n";
+                  if (write(fd, response.c_str(), response.size()) < 0) {
+                    std::cerr << "Failed to send response to client fd=" << fd << "\n";
+                    close(fd);
+                    FD_CLR(fd, &master_set);
+                  }
+                } else {
+                  std::string response = "-ERR DISCARD without MULTI\r\n";
+                  if (write(fd, response.c_str(), response.size()) < 0) {
+                    std::cerr << "Failed to send response to client fd=" << fd << "\n";
+                    close(fd);
+                    FD_CLR(fd, &master_set);
+                  }
+                }
+                pos = cur;
+                continue;
+              }
+              // BLPOP handling
+              if (!args.empty() && cmd_upper == "BLPOP" && args.size() == 3) {
+                std::string list_key = args[1];
+                double timeout = 0;
+                try { timeout = std::stod(args[2]); } catch (...) { timeout = 0; }
+                auto it = list_store.find(list_key);
+                if (it == list_store.end() || it->second.empty()) {
+                  BlpopWaiter w{fd, Clock::now(), timeout};
+                  blpop_waiting_clients[list_key].push(w);
+                  client_waiting_for_list[fd] = list_key;
+                  client_waiting_time[fd] = std::make_pair(w.start, timeout);
+                  pos = cur;
+                  continue;
+                } else {
+                  std::string val = it->second.front();
+                  it->second.erase(it->second.begin());
+                  std::string resp = "*2\r\n$" + std::to_string(list_key.size()) + "\r\n" + list_key + "\r\n";
+                  resp += "$" + std::to_string(val.size()) + "\r\n" + val + "\r\n";
+                  if (write(fd, resp.c_str(), resp.size()) < 0) {
+                    std::cerr << "Failed to send response to client fd=" << fd << "\n";
+                    close(fd);
+                    FD_CLR(fd, &master_set);
+                  }
+                  pos = cur;
+                  continue;
+                }
+              }
+              // XREAD blocking handling
+              if (!args.empty() && args.size() >= 4) {
+                if (cmd_upper == "XREAD" && args[1] == "block") {
+                  double timeout = 0;
+                  try { timeout = std::stod(args[2]) / 1000.0; } catch (...) { timeout = 0; }
+                  if (args[3] != "streams") {
+                    std::string response = "-ERR syntax error\r\n";
+                    if (write(fd, response.c_str(), response.size()) < 0) {
+                      std::cerr << "Failed to send response to client fd=" << fd << "\n";
+                      close(fd);
+                      FD_CLR(fd, &master_set);
+                    }
+                    pos = cur;
+                    continue;
+                  }
+                  int n_streams = (args.size() - 4) / 2;
+                  if ((args.size() - 4) % 2 != 0 || n_streams < 1) {
+                    std::string response = "-ERR wrong number of arguments for 'XREAD' command\r\n";
+                    if (write(fd, response.c_str(), response.size()) < 0) {
+                      std::cerr << "Failed to send response to client fd=" << fd << "\n";
+                      close(fd);
+                      FD_CLR(fd, &master_set);
+                    }
+                    pos = cur;
+                    continue;
+                  }
+                  std::vector<std::string> stream_keys;
+                  std::vector<std::string> last_ids;
+                  for (int i = 4; i < 4 + n_streams; ++i) {
+                    stream_keys.push_back(args[i]);
+                  }
+                  for (int i = 4 + n_streams; i < 4 + 2 * n_streams; ++i) {
+                    last_ids.push_back(args[i]);
+                  }
+                  for (int s = 0; s < n_streams; ++s) {
+                    if (last_ids[s] == "$") {
+                      auto it = stream_store.find(stream_keys[s]);
+                      if (it != stream_store.end() && !it->second.empty()) {
+                        last_ids[s] = it->second.back().id;
+                      } else {
+                        last_ids[s] = "0-0";
+                      }
+                    }
+                  }
+                  std::vector<std::string> xread_args = {"XREAD", "streams"};
+                  xread_args.insert(xread_args.end(), stream_keys.begin(), stream_keys.end());
+                  xread_args.insert(xread_args.end(), last_ids.begin(), last_ids.end());
+                  CommandHandler check_handler(kv_store, expiry_store, list_store);
+                  std::string response = check_handler.handle(xread_args);
+                  bool has_data = false;
+                  size_t pos2 = 0;
+                  for (int i = 0; i < n_streams; ++i) {
+                    std::string stream_name = stream_keys[i];
+                    std::string stream_pattern = "$" + std::to_string(stream_name.size()) + "\r\n" + stream_name + "\r\n*";
+                    size_t stream_pos = response.find(stream_pattern, pos2);
+                    if (stream_pos != std::string::npos) {
+                      size_t count_start = stream_pos + stream_pattern.size();
+                      size_t count_end = response.find("\r\n", count_start);
+                      if (count_end != std::string::npos) {
+                        std::string count_str = response.substr(count_start, count_end - count_start);
+                        if (count_str != "0") {
+                          has_data = true;
+                          break;
+                        }
+                      }
+                      pos2 = count_end;
+                    }
+                  }
+                  if (has_data) {
+                    if (write(fd, response.c_str(), response.size()) < 0) {
+                      std::cerr << "Failed to send response to client fd=" << fd << "\n";
+                      close(fd);
+                      FD_CLR(fd, &master_set);
+                    }
+                  } else {
+                    XreadWaiter w{fd, Clock::now(), timeout, stream_keys, last_ids};
+                    xread_waiting_clients.push_back(w);
+                  }
+                  pos = cur;
+                  continue;
+                }
+              }
+              // INFO replication handling
+              if (!args.empty() && cmd_upper == "INFO" && args.size() >= 2 && args[1] == "replication") {
+                std::string master_replid = "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb";
+                std::string master_repl_offset = "0";
+                std::string info;
+                if (is_replica) {
+                  info = "role:slave\n";
+                } else {
+                  info = "role:master\n";
+                  info += "master_replid:" + master_replid + "\n";
+                  info += "master_repl_offset:" + master_repl_offset + "\n";
+                }
+                if (!info.empty() && info.back() == '\n') info.pop_back();
+                std::string response = "$" + std::to_string(info.size()) + "\r\n" + info + "\r\n";
+                if (write(fd, response.c_str(), response.size()) < 0) {
+                  std::cerr << "Failed to send response to client fd=" << fd << "\n";
+                  close(fd);
+                  FD_CLR(fd, &master_set);
+                }
+                pos = cur;
+                continue;
+              }
+              // Normal command handling
+              CommandHandler handler(kv_store, expiry_store, list_store);
+              std::string response = handler.handle(args);
+              static const std::vector<std::string> write_cmds = {"SET", "DEL", "LPUSH", "RPUSH", "EXPIRE", "PEXPIRE", "INCR", "DECR", "XADD"};
+              if (!args.empty() && !cmd_upper.empty() && std::find(write_cmds.begin(), write_cmds.end(), cmd_upper) != write_cmds.end()) {
+                std::string resp = "*" + std::to_string(args.size()) + "\r\n";
+                for (const auto& arg : args) {
+                  resp += "$" + std::to_string(arg.size()) + "\r\n" + arg + "\r\n";
+                }
+                for (auto it = replica_fds.begin(); it != replica_fds.end(); ) {
+                  int rfd = *it;
+                  if (rfd == fd) { ++it; continue; }
+                  if (write(rfd, resp.c_str(), resp.size()) < 0) {
+                    std::cerr << "Failed to propagate to replica fd=" << rfd << "\n";
+                    close(rfd);
+                    FD_CLR(rfd, &master_set);
+                    it = replica_fds.erase(it);
+                  } else {
+                    ++it;
+                  }
+                }
+              }
+              if (!response.empty()) {
+                std::cout << "Sending response to client fd=" << fd << ": " << response << std::endl;
+                if (write(fd, response.c_str(), response.size()) < 0) {
+                  std::cerr << "Failed to send response to client fd=" << fd << "\n";
+                  close(fd);
+                  FD_CLR(fd, &master_set);
+                }
+              } else {
+                std::cout << "No response generated for client fd=" << fd << " (command: ";
+                for (const auto& a : args) std::cout << a << " ";
+                std::cout << ")\n";
+              }
+              pos = cur;
             }
+            // Remove processed bytes
+            if (pos > 0) buf = buf.substr(pos);
+          }
 
             // REPLCONF handshake support (master side)
             if (!args.empty() && cmd_upper == "REPLCONF") {
