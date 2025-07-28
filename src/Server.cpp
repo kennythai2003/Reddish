@@ -552,6 +552,14 @@ int main(int argc, char **argv) {
                   } else {
                     response = "-ERR EXEC without MULTI\r\n";
                   }
+                } else if (cmd_upper == "DISCARD") {
+                  if (client_in_multi[fd]) {
+                    client_in_multi[fd] = false;
+                    client_multi_queue[fd].clear();
+                    response = "+OK\r\n";
+                  } else {
+                    response = "-ERR DISCARD without MULTI\r\n";
+                  }
                 } else if (client_in_multi[fd]) {
                   // Inside MULTI, queue the command and reply QUEUED
                   client_multi_queue[fd].push_back(args);
