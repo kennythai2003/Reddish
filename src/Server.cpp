@@ -455,6 +455,26 @@ int main(int argc, char **argv) {
               }
               continue;
             }
+            // Handle PSYNC from replicas (for replication handshake)
+            if (!args.empty() && cmd_upper == "PSYNC") {
+              // Respond with FULLRESYNC <runid> <offset> and a minimal RDB file
+              std::string runid = "75cd7bc10c49047e0d163660f3b90625b1af31dc"; // static runid for test
+              std::string fullresync = "+FULLRESYNC " + runid + " 0\r\n";
+              if (write(fd, fullresync.c_str(), fullresync.size()) < 0) {
+                std::cerr << "Failed to send FULLRESYNC to replica fd=" << fd << "\n";
+                close(fd);
+                FD_CLR(fd, &master_set);
+                continue;
+              }
+              // Minimal RDB file (copied from test output, 88 bytes)
+              std::string rdb = "$88\r\nREDIS0011\xFA\tredis-ver\x057.2.0\xFA\nredis-bits\xC0@\xFA\x05ctime\xC2m\x08\xBCe\xFA\x08used-mem\xB0\xC4\x10\x00\xFA\x0baof-base\xC0\x00\xFF\xF0n;\xFE\xC0\xFFZ\xA2";
+              if (write(fd, rdb.c_str(), rdb.size()) < 0) {
+                std::cerr << "Failed to send RDB to replica fd=" << fd << "\n";
+                close(fd);
+                FD_CLR(fd, &master_set);
+              }
+              continue;
+            }
             // Normal command handling for clients
             CommandHandler handler(kv_store, expiry_store, list_store);
             std::string response = handler.handle(args);
