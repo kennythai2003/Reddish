@@ -510,45 +510,89 @@ int main(int argc, char **argv) {
                   std::cout << " " << args[i];
                 }
                 std::cout << std::endl;
-                
-                // Process the command and send response back to client
-              std::string response;
-              // Special handling for INFO replication
-              if (cmd_upper == "INFO" && args.size() == 2 && args[1] == "replication") {
-                // Minimal valid INFO replication response
-                std::string role = is_replica ? "slave" : "master";
-                std::string connected_slaves = is_replica ? "0" : std::to_string(replica_fds.size());
-                response =
-                  "# Replication\r\n"
-                  "role:" + role + "\r\n"
-                  "connected_slaves:" + connected_slaves + "\r\n"
-                  "master_replid:8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb\r\n"
-                  "master_repl_offset:0\r\n";
-                response = "$" + std::to_string(response.size()) + "\r\n" + response + "\r\n";
-              } else {
-                CommandHandler handler(kv_store, expiry_store, list_store);
-                response = handler.handle(args);
-              }
-                
+
+                std::string response;
+                // Transaction logic
+                if (cmd_upper == "MULTI") {
+                  client_in_multi[fd] = true;
+                  client_multi_queue[fd].clear();
+                  response = "+OK\r\n";
+                } else if (cmd_upper == "EXEC") {
+                  if (client_in_multi[fd]) {
+                    // Execute all queued commands and return RESP array
+                    std::vector<std::vector<std::string>> &queue = client_multi_queue[fd];
+                    CommandHandler handler(kv_store, expiry_store, list_store);
+                    response = "*" + std::to_string(queue.size()) + "\r\n";
+                    for (const auto& qargs : queue) {
+                      std::string r = handler.handle(qargs);
+                      // Remove trailing \r\n for each response if present
+                      if (!r.empty() && r.back() == '\n') {
+                        size_t p = r.rfind("\r\n");
+                        if (p != std::string::npos && p == r.size() - 2) {
+                          r = r.substr(0, r.size() - 2);
+                        }
+                      }
+                      // If response starts with '+', return as bulk string
+                      if (!r.empty() && r[0] == '+') {
+                        std::string val = r.substr(1); // skip +
+                        response += "$" + std::to_string(val.size()) + "\r\n" + val + "\r\n";
+                      } else if (!r.empty() && r[0] == '$') {
+                        // Already bulk string
+                        response += r + "\r\n";
+                      } else if (!r.empty() && r[0] == ':') {
+                        // Integer
+                        response += r + "\r\n";
+                      } else {
+                        // Fallback
+                        response += r + "\r\n";
+                      }
+                    }
+                    client_in_multi[fd] = false;
+                    client_multi_queue[fd].clear();
+                  } else {
+                    response = "-ERR EXEC without MULTI\r\n";
+                  }
+                } else if (client_in_multi[fd]) {
+                  // Inside MULTI, queue the command and reply QUEUED
+                  client_multi_queue[fd].push_back(args);
+                  response = "+QUEUED\r\n";
+                } else {
+                  // Special handling for INFO replication
+                  if (cmd_upper == "INFO" && args.size() == 2 && args[1] == "replication") {
+                    std::string role = is_replica ? "slave" : "master";
+                    std::string connected_slaves = is_replica ? "0" : std::to_string(replica_fds.size());
+                    response =
+                      "# Replication\r\n"
+                      "role:" + role + "\r\n"
+                      "connected_slaves:" + connected_slaves + "\r\n"
+                      "master_replid:8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb\r\n"
+                      "master_repl_offset:0\r\n";
+                    response = "$" + std::to_string(response.size()) + "\r\n" + response + "\r\n";
+                  } else {
+                    CommandHandler handler(kv_store, expiry_store, list_store);
+                    response = handler.handle(args);
+                  }
+                }
+
                 std::cout << "[CLIENT] Sending response: " << response.substr(0, 50);
                 if (response.length() > 50) std::cout << "...";
                 std::cout << std::endl;
-                
+
                 // Send response back to client
                 ssize_t sent = write(fd, response.c_str(), response.size());
                 if (sent < 0) {
                   std::cerr << "Failed to send response to client fd=" << fd << std::endl;
                 }
-                
+
                 // Special handling for PSYNC - send RDB file after FULLRESYNC response
-                std::string cmd_upper = args[0];
-                std::transform(cmd_upper.begin(), cmd_upper.end(), cmd_upper.begin(), ::toupper);
-                if (cmd_upper == "PSYNC" && args.size() == 3) {
+                std::string cmd_upper2 = args[0];
+                std::transform(cmd_upper2.begin(), cmd_upper2.end(), cmd_upper2.begin(), ::toupper);
+                if (cmd_upper2 == "PSYNC" && args.size() == 3) {
                   // Send empty RDB file after FULLRESYNC response
-                  std::string rdb_content = "REDIS0011\xfa\tredis-ver\x057.2.0\xfa\nredis-bits\xc0@\xfa\x05ctime\xc2m\b\xbce\xfa\bused-mem°\xc4\x10\x00\xfa\baof-base\xc0\x00\xff\xf0n;\xfe\xc0\xffZ\xa2";
+                  std::string rdb_content = "REDIS0011\xfa\tredis-ver\x057.2.0\xfa\nredis-bits\xc0@\xfa\x05ctime\xc2m\b\xbce\xfa\bused-mem\xb0\xc4\x10\x00\xfa\baof-base\xc0\x00\xff\xf0n;\xfe\xc0\xffZ\xa2";
                   std::string rdb_header = "$" + std::to_string(rdb_content.size()) + "\r\n";
                   std::string full_rdb = rdb_header + rdb_content;
-                  
+
                   ssize_t rdb_sent = write(fd, full_rdb.c_str(), full_rdb.size());
                   if (rdb_sent < 0) {
                     std::cerr << "Failed to send RDB file to replica fd=" << fd << std::endl;
@@ -558,30 +602,28 @@ int main(int argc, char **argv) {
                     replica_fds.push_back(fd);
                   }
                 }
-              // Propagate write commands to all replicas
-              // Only propagate after handshake (i.e., fd is not a replica)
-              // Only propagate write commands (SET, RPUSH, LPUSH, XADD, INCR, etc.)
-              static const std::vector<std::string> write_cmds = {"SET", "RPUSH", "LPUSH", "XADD", "INCR", "DEL"};
-              if (std::find(write_cmds.begin(), write_cmds.end(), cmd_upper) != write_cmds.end() && !replica_fds.empty()) {
-                // Reconstruct the original RESP command
-                std::string resp_cmd = "*" + std::to_string(args.size()) + "\r\n";
-                for (const auto& arg : args) {
-                  resp_cmd += "$" + std::to_string(arg.size()) + "\r\n" + arg + "\r\n";
-                }
-                // Send to all replicas
-                for (auto it = replica_fds.begin(); it != replica_fds.end(); ) {
-                  int rfd = *it;
-                  ssize_t w = write(rfd, resp_cmd.c_str(), resp_cmd.size());
-                  if (w < 0) {
-                    std::cerr << "Failed to propagate to replica fd=" << rfd << ", removing from list." << std::endl;
-                    close(rfd);
-                    FD_CLR(rfd, &master_set);
-                    it = replica_fds.erase(it);
-                  } else {
-                    ++it;
+                // Propagate write commands to all replicas
+                static const std::vector<std::string> write_cmds = {"SET", "RPUSH", "LPUSH", "XADD", "INCR", "DEL"};
+                if (std::find(write_cmds.begin(), write_cmds.end(), cmd_upper) != write_cmds.end() && !replica_fds.empty() && !client_in_multi[fd]) {
+                  // Reconstruct the original RESP command
+                  std::string resp_cmd = "*" + std::to_string(args.size()) + "\r\n";
+                  for (const auto& arg : args) {
+                    resp_cmd += "$" + std::to_string(arg.size()) + "\r\n" + arg + "\r\n";
+                  }
+                  // Send to all replicas
+                  for (auto it = replica_fds.begin(); it != replica_fds.end(); ) {
+                    int rfd = *it;
+                    ssize_t w = write(rfd, resp_cmd.c_str(), resp_cmd.size());
+                    if (w < 0) {
+                      std::cerr << "Failed to propagate to replica fd=" << rfd << ", removing from list." << std::endl;
+                      close(rfd);
+                      FD_CLR(rfd, &master_set);
+                      it = replica_fds.erase(it);
+                    } else {
+                      ++it;
+                    }
                   }
                 }
-              }
               }
               pos = cur;
             }
