@@ -55,16 +55,21 @@ int main(int argc, char **argv) {
   std::unordered_map<int, std::pair<TimePoint, double>> client_waiting_time;
   // For XREAD blocking
   std::vector<XreadWaiter> xread_waiting_clients;
-  
+
+  // Declare fd_set and fd_max early so they are in scope for handshake logic
+  fd_set master_set, read_fds;
+  int fd_max;
+
   // Flush after every std::cout / std::cerr
   std::cout << std::unitbuf;
   std::cerr << std::unitbuf;
-  
+
   int server_fd = socket(AF_INET, SOCK_STREAM, 0);
   if (server_fd < 0) {
-   std::cerr << "Failed to create server socket\n";
-   return 1;
+    std::cerr << "Failed to create server socket\n";
+    return 1;
   }
+  fd_max = server_fd;
   
   // Since the tester restarts your program quite often, setting SO_REUSEADDR
   // ensures that we don't run into 'Address already in use' errors
