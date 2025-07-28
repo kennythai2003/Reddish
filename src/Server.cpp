@@ -105,7 +105,7 @@ int main(int argc, char **argv) {
   }
   // If replica, connect to master and send PING handshake
   int master_fd = -1;
-  bool add_master_fd_to_set = false;
+  // No need for add_master_fd_to_set flag anymore
   if (is_replica && !master_host.empty() && master_port > 0) {
     struct addrinfo hints, *res;
     memset(&hints, 0, sizeof(hints));
@@ -243,11 +243,7 @@ int main(int argc, char **argv) {
 
   FD_ZERO(&master_set);
   FD_SET(server_fd, &master_set);
-  // After handshake, if we need to add master_fd to select set
-  if (add_master_fd_to_set && master_fd >= 0) {
-    FD_SET(master_fd, &master_set);
-    if (master_fd > fd_max) fd_max = master_fd;
-  }
+  // master_fd is added to master_set after handshake if needed
 
   std::cout << "Server event loop started. Waiting for clients...\n";
 
