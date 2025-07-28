@@ -39,6 +39,93 @@ struct XreadWaiter {
     std::vector<std::string> last_ids;
 };
 
+// Helper: read a line (ending with CRLF) from a string, updating pos
+std::string read_line(const std::string& data, size_t& pos) {
+    size_t end = data.find("\r\n", pos);
+    if (end == std::string::npos) throw std::runtime_error("incomplete line");
+    std::string line = data.substr(pos, end - pos);
+    pos = end + 2;
+    return line;
+}
+
+// Helper: calculate total RESP array length in bytes (for one command)
+size_t calc_total_resp_length(const std::string& data) {
+    size_t pos = 0;
+    if (data.empty() || data[0] != '*') throw std::runtime_error("not an array");
+    std::string first_line = read_line(data, pos); // e.g., "*3"
+    int num_elements = std::stoi(first_line.substr(1));
+    for (int i = 0; i < num_elements; ++i) {
+        if (pos >= data.size() || data[pos] != '$') throw std::runtime_error("not a bulk string");
+        std::string len_line = read_line(data, pos); // e.g., "$3"
+        int str_len = std::stoi(len_line.substr(1));
+        if (pos + str_len + 2 > data.size()) throw std::runtime_error("incomplete bulk string");
+        pos += str_len + 2; // content + CRLF
+    }
+    return pos;
+}
+
+// Helper: parse a RESP array from a string (returns vector of strings)
+std::vector<std::string> parse_resp(const std::string& data) {
+    size_t pos = 0;
+    if (data.empty() || data[0] != '*') throw std::runtime_error("not an array");
+    std::string first_line = read_line(data, pos); // e.g., "*3"
+    int num_elements = std::stoi(first_line.substr(1));
+    std::vector<std::string> result;
+    for (int i = 0; i < num_elements; ++i) {
+        if (pos >= data.size() || data[pos] != '$') throw std::runtime_error("not a bulk string");
+        std::string len_line = read_line(data, pos); // e.g., "$3"
+        int str_len = std::stoi(len_line.substr(1));
+        if (pos + str_len + 2 > data.size()) throw std::runtime_error("incomplete bulk string");
+        std::string val = data.substr(pos, str_len);
+        pos += str_len + 2; // skip value and CRLF
+        result.push_back(val);
+    }
+    return result;
+}
+
+// Helper: handle a command (like CommandHandler::handle), but does not send a response if fd == -1
+void handle_command(int fd, const std::vector<std::string>& args,
+    std::unordered_map<std::string, std::string>& kv_store,
+    std::unordered_map<std::string, std::chrono::steady_clock::time_point>& expiry_store,
+    std::unordered_map<std::string, std::vector<std::string>>& list_store) {
+    CommandHandler handler(kv_store, expiry_store, list_store);
+    std::string response = handler.handle(args);
+    if (fd >= 0 && !response.empty()) {
+        write(fd, response.c_str(), response.size());
+    }
+}
+
+// Replication loop: read and apply commands from master
+void start_replication_loop(int master_fd,
+    std::unordered_map<std::string, std::string>& kv_store,
+    std::unordered_map<std::string, std::chrono::steady_clock::time_point>& expiry_store,
+    std::unordered_map<std::string, std::vector<std::string>>& list_store) {
+    std::string buffer;
+    char temp[1024];
+    while (true) {
+        ssize_t n = read(master_fd, temp, sizeof(temp));
+        if (n <= 0) {
+            std::cerr << "Replication socket closed or failed.\n";
+            break;
+        }
+        buffer.append(temp, n);
+        // Process multiple RESP commands in buffer
+        while (!buffer.empty()) {
+            try {
+                std::vector<std::string> cmd = parse_resp(buffer);
+                // Apply command to local state, do not reply
+                handle_command(-1, cmd, kv_store, expiry_store, list_store);
+                size_t total_len = calc_total_resp_length(buffer);
+                buffer = buffer.substr(total_len);
+            } catch (const std::exception&) {
+                // Incomplete command, wait for more data
+                break;
+            }
+        }
+    }
+    close(master_fd);
+}
+
 int main(int argc, char **argv) {
   // Track all connected replica fds
   std::vector<int> replica_fds;
@@ -203,7 +290,14 @@ int main(int argc, char **argv) {
   std::unordered_map<int, bool> client_in_multi;
   // Queued commands per client fd
   std::unordered_map<int, std::vector<std::vector<std::string>>> client_multi_queue;
-  // For this stage, we only need to track if MULTI was called, not queue commands
+
+  // If running as a replica, start replication loop in a thread
+  std::thread repl_thread;
+  if (is_replica && master_fd >= 0) {
+    repl_thread = std::thread(start_replication_loop, master_fd, std::ref(kv_store), std::ref(expiry_store), std::ref(list_store));
+    repl_thread.detach();
+  }
+
   while (true) {
     read_fds = master_set;
     // Compute select timeout for BLPOP and XREAD
