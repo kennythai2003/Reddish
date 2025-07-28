@@ -641,29 +641,100 @@ int main(int argc, char **argv) {
             CommandHandler handler(kv_store, expiry_store, list_store);
             std::string response = handler.handle(args);
 
+            // Only propagate if command was successful (not an error response)
+            bool is_error = !response.empty() && response[0] == '-';
+
             // Propagate write commands to replica if connected
-            // Only propagate if not from a replica itself
+            // Only propagate if not from a replica itself and command succeeded
             static const std::vector<std::string> write_cmds = {"SET", "DEL", "LPUSH", "RPUSH", "EXPIRE", "PEXPIRE", "INCR", "DECR", "XADD"};
-            if (!args.empty() && !cmd_upper.empty() && std::find(write_cmds.begin(), write_cmds.end(), cmd_upper) != write_cmds.end()) {
-              // Reconstruct the RESP array for the command
-              std::string resp = "*" + std::to_string(args.size()) + "\r\n";
-              for (const auto& arg : args) {
-                resp += "$" + std::to_string(arg.size()) + "\r\n" + arg + "\r\n";
-              }
-              // Send to all replicas except the sender
-              for (auto it = replica_fds.begin(); it != replica_fds.end(); ) {
-                int rfd = *it;
-                if (rfd == fd) { ++it; continue; }
-                if (write(rfd, resp.c_str(), resp.size()) < 0) {
-                  std::cerr << "Failed to propagate to replica fd=" << rfd << "\n";
-                  // Remove closed/broken replica fds
-                  close(rfd);
-                  FD_CLR(rfd, &master_set);
-                  it = replica_fds.erase(it);
-                } else {
-                  ++it;
+            if (!is_error && !args.empty() && !cmd_upper.empty() && std::find(write_cmds.begin(), write_cmds.end(), cmd_upper) != write_cmds.end()) {
+                // Check if this fd is a replica (don't propagate commands from replicas)
+                bool is_from_replica = std::find(replica_fds.begin(), replica_fds.end(), fd) != replica_fds.end();
+                if (!is_from_replica) {
+                    // Reconstruct the RESP array for the command
+                    std::string resp = "*" + std::to_string(args.size()) + "\r\n";
+                    for (const auto& arg : args) {
+                        resp += "$" + std::to_string(arg.size()) + "\r\n" + arg + "\r\n";
+                    }
+                    // Send to all replicas
+                    for (auto it = replica_fds.begin(); it != replica_fds.end(); ) {
+                        int rfd = *it;
+                        if (write(rfd, resp.c_str(), resp.size()) < 0) {
+                            std::cerr << "Failed to propagate to replica fd=" << rfd << "\n";
+                            // Remove closed/broken replica fds
+                            close(rfd);
+                            FD_CLR(rfd, &master_set);
+                            it = replica_fds.erase(it);
+                        } else {
+                            ++it;
+                        }
+                    }
                 }
-              }
+            }
+
+            // After RPUSH/LPUSH, check for blocked BLPOP clients
+            if (!args.empty() && (cmd_upper == "RPUSH" || cmd_upper == "LPUSH") && args.size() >= 3) {
+                std::string list_key = args[1];
+                auto &wait_queue = blpop_waiting_clients[list_key];
+                std::queue<BlpopWaiter> new_queue;
+                while (!wait_queue.empty() && !list_store[list_key].empty()) {
+                    BlpopWaiter w = wait_queue.front(); wait_queue.pop();
+                    client_waiting_for_list.erase(w.fd);
+                    client_waiting_time.erase(w.fd);
+                    std::string val = list_store[list_key].front();
+                    list_store[list_key].erase(list_store[list_key].begin());
+                    std::string resp = "*2\r\n$" + std::to_string(list_key.size()) + "\r\n" + list_key + "\r\n";
+                    resp += "$" + std::to_string(val.size()) + "\r\n" + val + "\r\n";
+                    if (write(w.fd, resp.c_str(), resp.size()) < 0) {
+                        std::cerr << "Failed to send response to client fd=" << w.fd << "\n";
+                        close(w.fd);
+                        FD_CLR(w.fd, &master_set);
+                    }
+                }
+                wait_queue = std::move(new_queue);
+            }
+
+            // After XADD, check for blocked XREAD clients
+            if (!args.empty() && cmd_upper == "XADD" && args.size() >= 5) {
+                std::string stream_key = args[1];
+                std::cout << "XADD detected for stream: " << stream_key << ", checking " << xread_waiting_clients.size() << " waiting clients\n";
+                auto xread_it = xread_waiting_clients.begin();
+                while (xread_it != xread_waiting_clients.end()) {
+                    XreadWaiter& w = *xread_it;
+                    bool stream_matches = false;
+                    for (const std::string& key : w.stream_keys) {
+                        if (key == stream_key) {
+                            stream_matches = true;
+                            break;
+                        }
+                    }
+                    if (stream_matches) {
+                        std::cout << "Found matching client for stream " << stream_key << ", fd=" << w.fd << std::endl;
+                        // Generate XREAD response for this client
+                        std::vector<std::string> xread_args = {"XREAD", "streams"};
+                        xread_args.insert(xread_args.end(), w.stream_keys.begin(), w.stream_keys.end());
+                        xread_args.insert(xread_args.end(), w.last_ids.begin(), w.last_ids.end());
+                        CommandHandler xread_handler(kv_store, expiry_store, list_store);
+                        std::string xread_response = xread_handler.handle(xread_args);
+                        std::cout << "Sending XREAD response: " << xread_response << std::endl;
+                        if (write(w.fd, xread_response.c_str(), xread_response.size()) < 0) {
+                            std::cerr << "Failed to send response to client fd=" << w.fd << "\n";
+                            close(w.fd);
+                            FD_CLR(w.fd, &master_set);
+                        }
+                        xread_it = xread_waiting_clients.erase(xread_it);
+                    } else {
+                        ++xread_it;
+                    }
+                }
+            }
+
+            if (!response.empty()) {
+                if (write(fd, response.c_str(), response.size()) < 0) {
+                    std::cerr << "Failed to send response to client fd=" << fd << "\n";
+                    close(fd);
+                    FD_CLR(fd, &master_set);
+                }
             }
             
             // After RPUSH/LPUSH, check for blocked BLPOP clients
