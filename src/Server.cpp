@@ -37,6 +37,7 @@ struct XreadWaiter {
     double timeout; // seconds, 0 means infinite
     std::vector<std::string> stream_keys;
     std::vector<std::string> last_ids;
+    std::vector<size_t> stream_lengths_at_block; // For $ blocking, track stream length at block time
 };
 
 int main(int argc, char **argv) {
@@ -571,6 +572,7 @@ int main(int argc, char **argv) {
                     bool is_block = false;
                     std::vector<std::string> stream_keys;
                     std::vector<std::string> last_ids;
+                    std::vector<size_t> stream_lengths_at_block;
                     for (size_t i = 1; i + 1 < args.size(); ++i) {
                       if (args[i] == "BLOCK" && args[i+1] == "0") {
                         is_block = true;
@@ -585,6 +587,17 @@ int main(int argc, char **argv) {
                       for (size_t j = 0; j < n_streams; ++j) {
                         stream_keys.push_back(args[idx + 1 + j]);
                         last_ids.push_back(args[idx + 1 + n_streams + j]);
+                        // For $ blocking, record stream length at block time
+                        if (args[idx + 1 + n_streams + j] == "$") {
+                          auto sit = stream_store.find(args[idx + 1 + j]);
+                          if (sit != stream_store.end()) {
+                            stream_lengths_at_block.push_back(sit->second.size());
+                          } else {
+                            stream_lengths_at_block.push_back(0);
+                          }
+                        } else {
+                          stream_lengths_at_block.push_back(0); // Not used for non-$
+                        }
                       }
                     }
                     bool can_fulfill = false;
@@ -629,8 +642,8 @@ int main(int argc, char **argv) {
                       }
                       response += field_resp;
                     } else if (is_block) {
-                      // Add to xread_waiting_clients
-                      xread_waiting_clients.push_back({fd, Clock::now(), 0, stream_keys, last_ids});
+                      // Add to xread_waiting_clients, with stream_lengths_at_block
+                      xread_waiting_clients.push_back({fd, Clock::now(), 0, stream_keys, last_ids, stream_lengths_at_block});
                       // Do not send a response now
                       continue;
                     } else {
@@ -711,12 +724,25 @@ int main(int argc, char **argv) {
                     bool fulfilled = false;
                     for (size_t i = 0; i < it->stream_keys.size(); ++i) {
                       if (it->stream_keys[i] == args[1]) { // args[1] is stream key
-                        // Only consider the latest entry (just added)
                         auto sit = stream_store.find(args[1]);
                         if (sit != stream_store.end() && !sit->second.empty()) {
-                          const auto& entry = sit->second.back();
-                          if (it->last_ids[i] == "$" || entry.id > it->last_ids[i]) {
-                            // Build RESP array for this entry
+                          // Only unblock if stream grew since block (for $)
+                          bool should_unblock = false;
+                          if (it->last_ids[i] == "$") {
+                            // Only unblock if stream grew
+                            if (sit->second.size() > it->stream_lengths_at_block[i]) {
+                              should_unblock = true;
+                            }
+                          } else {
+                            // For explicit IDs, unblock if new entry's id > last_id
+                            const auto& entry = sit->second.back();
+                            if (entry.id > it->last_ids[i]) {
+                              should_unblock = true;
+                            }
+                          }
+                          if (should_unblock) {
+                            // Always return the latest entry
+                            const auto& entry = sit->second.back();
                             std::string resp = "*1\r\n";
                             resp += "*2\r\n";
                             resp += "$" + std::to_string(args[1].size()) + "\r\n" + args[1] + "\r\n";
