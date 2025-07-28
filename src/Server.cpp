@@ -182,12 +182,8 @@ int main(int argc, char **argv) {
                                     remaining -= nr;
                                   }
                                   std::cout << "Received complete RDB file from master\n";
-                                  // Add master_fd to the select() set so we can receive commands
-                                  FD_SET(master_fd, &master_set);
-                                  if (master_fd > fd_max) fd_max = master_fd;
-                                  // IMPORTANT: Add master_fd to the select() set
-                                  FD_SET(master_fd, &master_set);
-                                  if (master_fd > fd_max) fd_max = master_fd;
+                                  // Set a flag to add master_fd to select set after master_set/fd_max are declared
+                                  bool add_master_fd_to_set = true;
                                 }
                               }
                             }
@@ -237,10 +233,18 @@ int main(int argc, char **argv) {
   // You can use print statements as follows for debugging, they'll be visible when running tests.
   std::cout << "Logs from your program will appear here!\n";
 
+
   fd_set master_set, read_fds;
   int fd_max = server_fd;
   FD_ZERO(&master_set);
   FD_SET(server_fd, &master_set);
+  // If we need to add master_fd to the select set after handshake
+  bool add_master_fd_to_set = false;
+  // After handshake, if we need to add master_fd to select set
+  if (add_master_fd_to_set && master_fd >= 0) {
+    FD_SET(master_fd, &master_set);
+    if (master_fd > fd_max) fd_max = master_fd;
+  }
 
   std::cout << "Server event loop started. Waiting for clients...\n";
 
