@@ -98,6 +98,23 @@ int main(int argc, char **argv) {
       }
     }
   }
+
+  // Always bind and listen before any replica handshake, so server is ready for clients
+  struct sockaddr_in server_addr;
+  server_addr.sin_family = AF_INET;
+  server_addr.sin_addr.s_addr = INADDR_ANY;
+  server_addr.sin_port = htons(port);
+
+  if (bind(server_fd, (struct sockaddr *) &server_addr, sizeof(server_addr)) != 0) {
+    std::cerr << "Failed to bind to port " << port << "\n";
+    return 1;
+  }
+  int connection_backlog = 5;
+  if (listen(server_fd, connection_backlog) != 0) {
+    std::cerr << "listen failed\n";
+    return 1;
+  }
+
   // If replica, connect to master and send PING handshake
   int master_fd = -1;
   if (is_replica && !master_host.empty() && master_port > 0) {
@@ -211,21 +228,6 @@ int main(int argc, char **argv) {
     // After this, continue running the server to accept client connections
   }
 
-  struct sockaddr_in server_addr;
-  server_addr.sin_family = AF_INET;
-  server_addr.sin_addr.s_addr = INADDR_ANY;
-  server_addr.sin_port = htons(port);
-
-  if (bind(server_fd, (struct sockaddr *) &server_addr, sizeof(server_addr)) != 0) {
-    std::cerr << "Failed to bind to port " << port << "\n";
-    return 1;
-  }
-  
-  int connection_backlog = 5;
-  if (listen(server_fd, connection_backlog) != 0) {
-    std::cerr << "listen failed\n";
-    return 1;
-  }
   
   struct sockaddr_in client_addr;
   int client_addr_len = sizeof(client_addr);
