@@ -711,38 +711,37 @@ int main(int argc, char **argv) {
                     bool fulfilled = false;
                     for (size_t i = 0; i < it->stream_keys.size(); ++i) {
                       if (it->stream_keys[i] == args[1]) { // args[1] is stream key
-                        // Find entry with id > last_ids[i]
+                        // Only consider the latest entry (just added)
                         auto sit = stream_store.find(args[1]);
-                        if (sit != stream_store.end()) {
-                          for (const auto& entry : sit->second) {
-                            if (it->last_ids[i] == "$" || entry.id > it->last_ids[i]) {
-                              // Build RESP array for this entry
-                              std::string resp = "*1\r\n";
-                              resp += "*2\r\n";
-                              resp += "$" + std::to_string(args[1].size()) + "\r\n" + args[1] + "\r\n";
-                              resp += "*1\r\n";
-                              resp += "*2\r\n";
-                              resp += "$" + std::to_string(entry.id.size()) + "\r\n" + entry.id + "\r\n";
-                              // Convert map to vector<string> alternating key/value
-                              std::vector<std::string> kv_fields;
-                              for (const auto& kv : entry.fields) {
-                                kv_fields.push_back(kv.first);
-                                kv_fields.push_back(kv.second);
-                              }
-                              std::string field_resp = "*" + std::to_string(kv_fields.size()) + "\r\n";
-                              for (const auto& f : kv_fields) {
-                                field_resp += "$" + std::to_string(f.size()) + "\r\n" + f + "\r\n";
-                              }
-                              resp += field_resp;
-                              ssize_t sent = write(it->fd, resp.c_str(), resp.size());
-                              if (sent < 0) {
-                                std::cerr << "Failed to send XREAD unblock to fd=" << it->fd << std::endl;
-                              }
-                              close(it->fd);
-                              FD_CLR(it->fd, &master_set);
-                              fulfilled = true;
-                              break;
+                        if (sit != stream_store.end() && !sit->second.empty()) {
+                          const auto& entry = sit->second.back();
+                          if (it->last_ids[i] == "$" || entry.id > it->last_ids[i]) {
+                            // Build RESP array for this entry
+                            std::string resp = "*1\r\n";
+                            resp += "*2\r\n";
+                            resp += "$" + std::to_string(args[1].size()) + "\r\n" + args[1] + "\r\n";
+                            resp += "*1\r\n";
+                            resp += "*2\r\n";
+                            resp += "$" + std::to_string(entry.id.size()) + "\r\n" + entry.id + "\r\n";
+                            // Convert map to vector<string> alternating key/value
+                            std::vector<std::string> kv_fields;
+                            for (const auto& kv : entry.fields) {
+                              kv_fields.push_back(kv.first);
+                              kv_fields.push_back(kv.second);
                             }
+                            std::string field_resp = "*" + std::to_string(kv_fields.size()) + "\r\n";
+                            for (const auto& f : kv_fields) {
+                              field_resp += "$" + std::to_string(f.size()) + "\r\n" + f + "\r\n";
+                            }
+                            resp += field_resp;
+                            ssize_t sent = write(it->fd, resp.c_str(), resp.size());
+                            if (sent < 0) {
+                              std::cerr << "Failed to send XREAD unblock to fd=" << it->fd << std::endl;
+                            }
+                            close(it->fd);
+                            FD_CLR(it->fd, &master_set);
+                            fulfilled = true;
+                            break;
                           }
                         }
                       }
