@@ -218,10 +218,7 @@ int main(int argc, char **argv) {
                   if (pos > 0) leftover = leftover.substr(pos);
                 }
                 // Debug: print kv_store after master sync
-                std::cout << "[DEBUG] Replica kv_store after master sync:" << std::endl;
-                for (const auto& kv : kv_store) {
-                  std::cout << "  '" << kv.first << "' => '" << kv.second << "'" << std::endl;
-                }
+                // ...removed debug output...
               }
               // Close master_fd after sync so it is not included in the event loop
               if (master_fd >= 0) {
@@ -266,12 +263,7 @@ int main(int argc, char **argv) {
   std::unordered_map<int, std::vector<std::vector<std::string>>> client_multi_queue;
   // For this stage, we only need to track if MULTI was called, not queue commands
   while (true) {
-    // Debug: print all fds in master_set before select
-    std::cout << "[DEBUG] master_set fds: ";
-    for (int dbg_fd = 0; dbg_fd <= fd_max; ++dbg_fd) {
-      if (FD_ISSET(dbg_fd, &master_set)) std::cout << dbg_fd << " ";
-    }
-    std::cout << std::endl;
+    // ...removed debug output...
     read_fds = master_set;
     // Compute select timeout for BLPOP and XREAD
     timeval *timeout_ptr = nullptr;
@@ -410,9 +402,7 @@ int main(int argc, char **argv) {
             // Try to parse as many RESP arrays as possible
             std::string& buf = client_buffers[fd];
             size_t pos = 0;
-            std::cout << "[DEBUG] Processing fd=" << fd << ", buffer: '" << buf << "'" << std::endl;
             while (pos < buf.size()) {
-              std::cout << "[DEBUG] fd=" << fd << " buffer: '" << buf.substr(pos) << "'\n";
               // Try to find a RESP array
               size_t arr_start = buf.find('*', pos);
               if (arr_start == std::string::npos) break;
@@ -749,7 +739,7 @@ int main(int argc, char **argv) {
                 }
               }
               if (!response.empty()) {
-                std::cout << "Sending response to client fd=" << fd << ": " << response << std::endl;
+                // ...removed debug output...
                 if (write(fd, response.c_str(), response.size()) < 0) {
                   std::cerr << "Failed to send response to client fd=" << fd << "\n";
                   close(fd);
@@ -758,9 +748,6 @@ int main(int argc, char **argv) {
               } else {
                 // Always send a valid RESP response, even if CommandHandler returns empty
                 std::string null_resp = "$-1\r\n";
-                std::cout << "No response generated for client fd=" << fd << " (command: ";
-                for (const auto& a : args) std::cout << a << " ";
-                std::cout << ") -- sending RESP Null Bulk String" << std::endl;
                 if (write(fd, null_resp.c_str(), null_resp.size()) < 0) {
                   std::cerr << "Failed to send null response to client fd=" << fd << "\n";
                   close(fd);
