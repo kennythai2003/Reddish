@@ -440,6 +440,28 @@ std::string CommandHandler::handle(const std::vector<std::string>& args) {
             }
         }
         return resp;
+    } else if (cmd == "REPLCONF" && args.size() >= 3) {
+        // Handle REPLCONF commands from replicas
+        std::string subcommand = args[1];
+        std::transform(subcommand.begin(), subcommand.end(), subcommand.begin(), ::toupper);
+        
+        if (subcommand == "LISTENING-PORT" && args.size() == 3) {
+            // REPLCONF listening-port <port>
+            return "+OK\r\n";
+        } else if (subcommand == "CAPA" && args.size() == 3) {
+            // REPLCONF capa <capability>
+            return "+OK\r\n";
+        } else if (subcommand == "GETACK" && args.size() == 2) {
+            // REPLCONF GETACK *
+            return "*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$1\r\n0\r\n";
+        } else {
+            return "+OK\r\n"; // Generic OK for unknown REPLCONF subcommands
+        }
+    } else if (cmd == "PSYNC" && args.size() == 3) {
+        // Handle PSYNC command from replicas
+        // For now, always respond with FULLRESYNC
+        std::string replication_id = "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb";
+        return "+FULLRESYNC " + replication_id + " 0\r\n";
     }
     
     return "-ERR unknown command\r\n";
