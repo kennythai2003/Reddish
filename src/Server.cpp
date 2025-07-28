@@ -243,7 +243,10 @@ int main(int argc, char **argv) {
 
   FD_ZERO(&master_set);
   FD_SET(server_fd, &master_set);
-  // master_fd is added to master_set after handshake if needed
+  if (is_replica && master_fd >= 0) {
+    FD_SET(master_fd, &master_set);
+    if (master_fd > fd_max) fd_max = master_fd;
+  }
 
   std::cout << "Server event loop started. Waiting for clients...\n";
 
