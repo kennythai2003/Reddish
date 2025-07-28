@@ -503,10 +503,28 @@ int main(int argc, char **argv) {
                 cmd_upper = args[0];
                 std::transform(cmd_upper.begin(), cmd_upper.end(), cmd_upper.begin(), ::toupper);
               }
-              // ...existing command handling code (unchanged)...
-              // ---- BEGIN EXISTING COMMAND HANDLING ----
-              // ...existing code...
-              // ---- END EXISTING COMMAND HANDLING ----
+              // Handle client commands
+              if (!args.empty()) {
+                std::cout << "[CLIENT] Processing command: " << args[0];
+                for (size_t i = 1; i < args.size(); ++i) {
+                  std::cout << " " << args[i];
+                }
+                std::cout << std::endl;
+                
+                // Process the command and send response back to client
+                CommandHandler handler(kv_store, expiry_store, list_store);
+                std::string response = handler.handle(args);
+                
+                std::cout << "[CLIENT] Sending response: " << response.substr(0, 50);
+                if (response.length() > 50) std::cout << "...";
+                std::cout << std::endl;
+                
+                // Send response back to client
+                ssize_t sent = write(fd, response.c_str(), response.size());
+                if (sent < 0) {
+                  std::cerr << "Failed to send response to client fd=" << fd << std::endl;
+                }
+              }
               pos = cur;
             }
             if (pos > 0) buf = buf.substr(pos);
