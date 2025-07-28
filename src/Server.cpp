@@ -241,8 +241,6 @@ int main(int argc, char **argv) {
   std::cout << "Logs from your program will appear here!\n";
 
 
-  fd_set master_set, read_fds;
-  int fd_max = server_fd;
   FD_ZERO(&master_set);
   FD_SET(server_fd, &master_set);
   // After handshake, if we need to add master_fd to select set
