@@ -40,6 +40,8 @@ struct XreadWaiter {
 };
 
 int main(int argc, char **argv) {
+  // Track the fd of the connected replica (only one for this stage)
+  int replica_fd = -1;
   std::unordered_map<std::string, std::string> kv_store;
   // Store expiry as milliseconds since epoch
   std::unordered_map<std::string, std::chrono::steady_clock::time_point> expiry_store;
@@ -381,6 +383,8 @@ int main(int argc, char **argv) {
                 FD_CLR(fd, &master_set);
                 continue;
               }
+              // Mark this fd as the replica connection
+              replica_fd = fd;
               continue;
             }
             // Transaction support: MULTI/EXEC
@@ -636,6 +640,25 @@ int main(int argc, char **argv) {
             // Normal command handling
             CommandHandler handler(kv_store, expiry_store, list_store);
             std::string response = handler.handle(args);
+
+            // Propagate write commands to replica if connected
+            // Only propagate if not from the replica itself
+            if (fd != replica_fd && replica_fd != -1) {
+              // List of write commands to propagate
+              static const std::vector<std::string> write_cmds = {"SET", "DEL", "LPUSH", "RPUSH", "EXPIRE", "PEXPIRE", "INCR", "DECR", "XADD"};
+              if (!cmd_upper.empty() && std::find(write_cmds.begin(), write_cmds.end(), cmd_upper) != write_cmds.end()) {
+                // Reconstruct the RESP array for the command
+                std::string resp = "*" + std::to_string(args.size()) + "\r\n";
+                for (const auto& arg : args) {
+                  resp += "$" + std::to_string(arg.size()) + "\r\n" + arg + "\r\n";
+                }
+                // Send to replica
+                if (write(replica_fd, resp.c_str(), resp.size()) < 0) {
+                  std::cerr << "Failed to propagate to replica fd=" << replica_fd << "\n";
+                  // Optionally, could close replica_fd and set to -1
+                }
+              }
+            }
             
             // After RPUSH/LPUSH, check for blocked BLPOP clients
             if (!args.empty() && (cmd_upper == "RPUSH" || cmd_upper == "LPUSH") && args.size() >= 3) {
