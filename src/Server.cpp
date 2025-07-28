@@ -524,6 +524,25 @@ int main(int argc, char **argv) {
                 if (sent < 0) {
                   std::cerr << "Failed to send response to client fd=" << fd << std::endl;
                 }
+                
+                // Special handling for PSYNC - send RDB file after FULLRESYNC response
+                std::string cmd_upper = args[0];
+                std::transform(cmd_upper.begin(), cmd_upper.end(), cmd_upper.begin(), ::toupper);
+                if (cmd_upper == "PSYNC" && args.size() == 3) {
+                  // Send empty RDB file after FULLRESYNC response
+                  std::string rdb_content = "REDIS0011\xfa\tredis-ver\x057.2.0\xfa\nredis-bits\xc0@\xfa\x05ctime\xc2m\b\xbce\xfa\bused-mem°\xc4\x10\x00\xfa\baof-base\xc0\x00\xff\xf0n;\xfe\xc0\xffZ\xa2";
+                  std::string rdb_header = "$" + std::to_string(rdb_content.size()) + "\r\n";
+                  std::string full_rdb = rdb_header + rdb_content;
+                  
+                  ssize_t rdb_sent = write(fd, full_rdb.c_str(), full_rdb.size());
+                  if (rdb_sent < 0) {
+                    std::cerr << "Failed to send RDB file to replica fd=" << fd << std::endl;
+                  } else {
+                    std::cout << "[MASTER] Sent RDB file to replica fd=" << fd << std::endl;
+                    // Track this fd as a replica for future command propagation
+                    replica_fds.push_back(fd);
+                  }
+                }
               }
               pos = cur;
             }
