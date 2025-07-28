@@ -110,47 +110,88 @@ int main(int argc, char **argv) {
       master_fd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
       if (master_fd >= 0) {
         if (connect(master_fd, res->ai_addr, res->ai_addrlen) == 0) {
-          // Set master_fd to blocking mode for handshake
           int flags = fcntl(master_fd, F_GETFL, 0);
           if (flags != -1) fcntl(master_fd, F_SETFL, flags & ~O_NONBLOCK);
-          // Send RESP PING: *1\r\n$4\r\nPING\r\n
+          // Handshake
           std::string ping = "*1\r\n$4\r\nPING\r\n";
-          ssize_t sent = send(master_fd, ping.c_str(), ping.size(), 0);
-          if (sent < 0) {
-            std::cerr << "Failed to send PING to master at " << master_host << ":" << master_port << "\n";
-          } else {
-            std::cout << "Sent PING to master at " << master_host << ":" << master_port << "\n";
-            // Wait for a response from master (PONG or any RESP simple string)
-            char resp_buf[128] = {0};
-            ssize_t n = recv(master_fd, resp_buf, sizeof(resp_buf)-1, 0);
-            if (n > 0) {
-              std::string resp(resp_buf, n);
-              if (!resp.empty() && resp[0] == '+') {
-                // Now send REPLCONF listening-port <PORT>
-                std::string port_str2 = std::to_string(port);
-                std::string replconf1 = "*3\r\n$8\r\nREPLCONF\r\n$14\r\nlistening-port\r\n$" + std::to_string(port_str2.size()) + "\r\n" + port_str2 + "\r\n";
-                send(master_fd, replconf1.c_str(), replconf1.size(), 0);
-                // Wait for response to REPLCONF listening-port
-                char resp_buf2[128] = {0};
-                ssize_t n2 = recv(master_fd, resp_buf2, sizeof(resp_buf2)-1, 0);
-                if (n2 > 0) {
-                  std::string resp2(resp_buf2, n2);
-                  if (!resp2.empty() && resp2[0] == '+') {
-                    // Now send REPLCONF capa psync2
-                    std::string replconf2 = "*3\r\n$8\r\nREPLCONF\r\n$4\r\ncapa\r\n$6\r\npsync2\r\n";
-                    send(master_fd, replconf2.c_str(), replconf2.size(), 0);
-                    // Wait for response to REPLCONF capa psync2
-                    char resp_buf3[128] = {0};
-                    ssize_t n3 = recv(master_fd, resp_buf3, sizeof(resp_buf3)-1, 0);
-                    if (n3 > 0) {
-                      std::string resp3(resp_buf3, n3);
-                      if (!resp3.empty() && resp3[0] == '+') {
-                        // Now send PSYNC ? -1
-                        std::string psync = "*3\r\n$5\r\nPSYNC\r\n$1\r\n?\r\n$2\r\n-1\r\n";
-                        send(master_fd, psync.c_str(), psync.size(), 0);
+          send(master_fd, ping.c_str(), ping.size(), 0);
+          char resp_buf[128] = {0};
+          ssize_t n = recv(master_fd, resp_buf, sizeof(resp_buf)-1, 0);
+          if (n > 0 && resp_buf[0] == '+') {
+            std::string port_str2 = std::to_string(port);
+            std::string replconf1 = "*3\r\n$8\r\nREPLCONF\r\n$14\r\nlistening-port\r\n$" + std::to_string(port_str2.size()) + "\r\n" + port_str2 + "\r\n";
+            send(master_fd, replconf1.c_str(), replconf1.size(), 0);
+            char resp_buf2[128] = {0};
+            ssize_t n2 = recv(master_fd, resp_buf2, sizeof(resp_buf2)-1, 0);
+            if (n2 > 0 && resp_buf2[0] == '+') {
+              std::string replconf2 = "*3\r\n$8\r\nREPLCONF\r\n$4\r\ncapa\r\n$6\r\npsync2\r\n";
+              send(master_fd, replconf2.c_str(), replconf2.size(), 0);
+              char resp_buf3[128] = {0};
+              ssize_t n3 = recv(master_fd, resp_buf3, sizeof(resp_buf3)-1, 0);
+              if (n3 > 0 && resp_buf3[0] == '+') {
+                std::string psync = "*3\r\n$5\r\nPSYNC\r\n$1\r\n?\r\n$2\r\n-1\r\n";
+                send(master_fd, psync.c_str(), psync.size(), 0);
+                // Wait for FULLRESYNC and RDB bulk string
+                std::string rdb_data;
+                bool rdb_done = false;
+                while (!rdb_done) {
+                  char buf[4096];
+                  ssize_t r = recv(master_fd, buf, sizeof(buf), 0);
+                  if (r <= 0) break;
+                  rdb_data.append(buf, r);
+                  // Look for end of RDB bulk string: $<len>\r\n...<binary>...
+                  size_t dollar = rdb_data.find('$');
+                  if (dollar != std::string::npos) {
+                    size_t rn = rdb_data.find("\r\n", dollar);
+                    if (rn != std::string::npos) {
+                      size_t len = std::stoul(rdb_data.substr(dollar + 1, rn - dollar - 1));
+                      size_t start = rn + 2;
+                      if (rdb_data.size() >= start + len) {
+                        // RDB file received, skip it
+                        rdb_data = rdb_data.substr(start + len);
+                        rdb_done = true;
+                        break;
                       }
                     }
                   }
+                }
+                // Now process propagated commands from master
+                std::string leftover = rdb_data;
+                while (true) {
+                  char buf[4096];
+                  ssize_t r = recv(master_fd, buf, sizeof(buf), 0);
+                  if (r <= 0) break;
+                  leftover.append(buf, r);
+                  // Parse as many RESP arrays as possible
+                  size_t pos = 0;
+                  while (pos < leftover.size()) {
+                    // Try to parse a RESP array
+                    size_t arr_start = leftover.find('*', pos);
+                    if (arr_start == std::string::npos) break;
+                    size_t rn = leftover.find("\r\n", arr_start);
+                    if (rn == std::string::npos) break;
+                    int n_args = std::stoi(leftover.substr(arr_start + 1, rn - arr_start - 1));
+                    std::vector<std::string> args;
+                    size_t cur = rn + 2;
+                    bool parse_fail = false;
+                    for (int i = 0; i < n_args; ++i) {
+                      if (cur >= leftover.size() || leftover[cur] != '$') { parse_fail = true; break; }
+                      size_t rn1 = leftover.find("\r\n", cur);
+                      if (rn1 == std::string::npos) { parse_fail = true; break; }
+                      int arglen = std::stoi(leftover.substr(cur + 1, rn1 - cur - 1));
+                      size_t start = rn1 + 2;
+                      if (start + arglen > leftover.size()) { parse_fail = true; break; }
+                      args.push_back(leftover.substr(start, arglen));
+                      cur = start + arglen + 2; // skip \r\n
+                    }
+                    if (parse_fail) break;
+                    // Apply the command to local state (no response)
+                    CommandHandler handler(kv_store, expiry_store, list_store);
+                    handler.handle(args);
+                    pos = cur;
+                  }
+                  // Remove processed bytes
+                  if (pos > 0) leftover = leftover.substr(pos);
                 }
               }
             }
@@ -167,6 +208,8 @@ int main(int argc, char **argv) {
     } else {
       std::cerr << "getaddrinfo failed for master host " << master_host << ":" << master_port << "\n";
     }
+    // After this, exit (replica only processes master connection)
+    return 0;
   }
 
   struct sockaddr_in server_addr;
