@@ -261,6 +261,12 @@ int main(int argc, char **argv) {
   std::unordered_map<int, std::vector<std::vector<std::string>>> client_multi_queue;
   // For this stage, we only need to track if MULTI was called, not queue commands
   while (true) {
+    // Debug: print all fds in master_set before select
+    std::cout << "[DEBUG] master_set fds: ";
+    for (int dbg_fd = 0; dbg_fd <= fd_max; ++dbg_fd) {
+      if (FD_ISSET(dbg_fd, &master_set)) std::cout << dbg_fd << " ";
+    }
+    std::cout << std::endl;
     read_fds = master_set;
     // Compute select timeout for BLPOP and XREAD
     timeval *timeout_ptr = nullptr;
@@ -357,7 +363,7 @@ int main(int argc, char **argv) {
           }
           FD_SET(new_client_fd, &master_set);
           if (new_client_fd > fd_max) fd_max = new_client_fd;
-          std::cout << "Client connected: fd=" << new_client_fd << "\n";
+          std::cout << "[DEBUG] Client connected: fd=" << new_client_fd << ", fd_max now " << fd_max << std::endl;
         } else {
           // Data from existing client
           char buffer[1024] = {0};
@@ -399,6 +405,7 @@ int main(int argc, char **argv) {
             // Try to parse as many RESP arrays as possible
             std::string& buf = client_buffers[fd];
             size_t pos = 0;
+            std::cout << "[DEBUG] Processing fd=" << fd << ", buffer: '" << buf << "'" << std::endl;
             while (pos < buf.size()) {
               std::cout << "[DEBUG] fd=" << fd << " buffer: '" << buf.substr(pos) << "'\n";
               // Try to find a RESP array
