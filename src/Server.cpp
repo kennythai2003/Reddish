@@ -602,7 +602,13 @@ int main(int argc, char **argv) {
                             can_fulfill = true;
                             found_stream.push_back(key);
                             found_id.push_back(entry.id);
-                            found_fields.push_back(entry.fields);
+                            // Convert map to vector<string> alternating key/value
+                            std::vector<std::string> kv_fields;
+                            for (const auto& kv : entry.fields) {
+                              kv_fields.push_back(kv.first);
+                              kv_fields.push_back(kv.second);
+                            }
+                            found_fields.push_back(kv_fields);
                             break;
                           }
                         }
@@ -717,8 +723,14 @@ int main(int argc, char **argv) {
                               resp += "*1\r\n";
                               resp += "*2\r\n";
                               resp += "$" + std::to_string(entry.id.size()) + "\r\n" + entry.id + "\r\n";
-                              std::string field_resp = "*" + std::to_string(entry.fields.size()) + "\r\n";
-                              for (const auto& f : entry.fields) {
+                              // Convert map to vector<string> alternating key/value
+                              std::vector<std::string> kv_fields;
+                              for (const auto& kv : entry.fields) {
+                                kv_fields.push_back(kv.first);
+                                kv_fields.push_back(kv.second);
+                              }
+                              std::string field_resp = "*" + std::to_string(kv_fields.size()) + "\r\n";
+                              for (const auto& f : kv_fields) {
                                 field_resp += "$" + std::to_string(f.size()) + "\r\n" + f + "\r\n";
                               }
                               resp += field_resp;
