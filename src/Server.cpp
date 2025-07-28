@@ -460,6 +460,10 @@ int main(int argc, char **argv) {
             }
             // Handle PSYNC from replicas (for replication handshake)
             if (!args.empty() && cmd_upper == "PSYNC") {
+              // Add this fd to replica_fds if not already present
+              if (std::find(replica_fds.begin(), replica_fds.end(), fd) == replica_fds.end()) {
+                replica_fds.push_back(fd);
+              }
               // Respond with FULLRESYNC <runid> <offset> and a minimal RDB file
               std::string runid = "75cd7bc10c49047e0d163660f3b90625b1af31dc"; // static runid for test
               std::string fullresync = "+FULLRESYNC " + runid + " 0\r\n";
@@ -505,6 +509,25 @@ int main(int argc, char **argv) {
                 std::cerr << "Failed to send response to client fd=" << fd << "\n";
                 close(fd);
                 FD_CLR(fd, &master_set);
+              }
+              // Propagate successful write commands to replicas
+              // Only propagate if this is not a replica connection and is a write command
+              static const std::vector<std::string> write_cmds = {"SET", "DEL", "RPUSH", "LPUSH", "LPOP", "RPOP", "EXPIRE", "PEXPIRE", "INCR", "DECR", "APPEND", "HSET", "HDEL", "HMSET", "SADD", "SREM", "ZADD", "ZREM"};
+              if (!args.empty()) {
+                std::string cmd_upper2 = args[0];
+                std::transform(cmd_upper2.begin(), cmd_upper2.end(), cmd_upper2.begin(), ::toupper);
+                if (std::find(write_cmds.begin(), write_cmds.end(), cmd_upper2) != write_cmds.end()) {
+                  // Only propagate if this fd is not a replica
+                  if (std::find(replica_fds.begin(), replica_fds.end(), fd) == replica_fds.end()) {
+                    // Reconstruct the original RESP request
+                    std::string orig_req = request;
+                    for (int repfd : replica_fds) {
+                      if (write(repfd, orig_req.c_str(), orig_req.size()) < 0) {
+                        std::cerr << "Failed to propagate to replica fd=" << repfd << "\n";
+                      }
+                    }
+                  }
+                }
               }
             }
           }
