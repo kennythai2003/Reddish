@@ -365,21 +365,17 @@ int main(int argc, char **argv) {
                 FD_CLR(fd, &master_set);
                 continue;
               }
-              // Send empty RDB file as bulk string: $<len>\r\n<binary>
-              // Hex: 52 45 44 49 53 30 30 30 33 FA 00 05 63 68 65 63 6B 73 75 6D C7 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
-              unsigned char empty_rdb[] = {
-                0x52, 0x45, 0x44, 0x49, 0x53, 0x30, 0x30, 0x30, 0x33, 0xFA, 0x00, 0x05, 0x63, 0x68, 0x65, 0x63, 0x6B, 0x73, 0x75, 0x6D, 0xC7, 0x00, 0x00, 0x00, 0x00,
-                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
-              };
-              size_t rdb_len = sizeof(empty_rdb);
-              std::string rdb_header = "$" + std::to_string(rdb_len) + "\r\n";
+              // Use a valid empty RDB file as a std::string, as in the reference code
+              const std::string empty_rdb =
+                "\x52\x45\x44\x49\x53\x30\x30\x31\x31\xfa\x09\x72\x65\x64\x69\x73\x2d\x76\x65\x72\x05\x37\x2e\x32\x2e\x30\xfa\x0a\x72\x65\x64\x69\x73\x2d\x62\x69\x74\x73\xc0\x40\xfa\x05\x63\x74\x69\x6d\x65\xc2\x6d\x08\xbc\x65\xfa\x08\x75\x73\x65\x64\x2d\x6d\x65\x6d\xc2\xb0\xc4\x10\x00\xfa\x08\x61\x6f\x66\x2d\x62\x61\x73\x65\xc0\x00\xff\xf0\x6e\x3b\xfe\xc0\xff\x5a\xa2";
+              std::string rdb_header = "$" + std::to_string(empty_rdb.length()) + "\r\n";
               if (write(fd, rdb_header.c_str(), rdb_header.size()) < 0) {
                 std::cerr << "Failed to send RDB header to client fd=" << fd << "\n";
                 close(fd);
                 FD_CLR(fd, &master_set);
                 continue;
               }
-              if (write(fd, empty_rdb, rdb_len) < 0) {
+              if (write(fd, empty_rdb.data(), empty_rdb.length()) < 0) {
                 std::cerr << "Failed to send RDB body to client fd=" << fd << "\n";
                 close(fd);
                 FD_CLR(fd, &master_set);
