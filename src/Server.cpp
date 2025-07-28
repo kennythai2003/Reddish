@@ -742,6 +742,7 @@ int main(int argc, char **argv) {
                           }
                           if (should_unblock) {
                             const auto& entry = sit->second.back();
+                            std::cout << "[DEBUG] Unblocking XREAD client fd=" << it->fd << " for stream '" << args[1] << "' with entry id=" << entry.id << std::endl;
                             std::string resp = "*1\r\n";
                             resp += "*2\r\n";
                             resp += "$" + std::to_string(args[1].size()) + "\r\n" + args[1] + "\r\n";
