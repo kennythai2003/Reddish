@@ -100,6 +100,7 @@ int main(int argc, char **argv) {
   }
   // If replica, connect to master and send PING handshake
   int master_fd = -1;
+  bool add_master_fd_to_set = false;
   if (is_replica && !master_host.empty() && master_port > 0) {
     struct addrinfo hints, *res;
     memset(&hints, 0, sizeof(hints));
@@ -182,8 +183,8 @@ int main(int argc, char **argv) {
                                     remaining -= nr;
                                   }
                                   std::cout << "Received complete RDB file from master\n";
-                                  // Set a flag to add master_fd to select set after master_set/fd_max are declared
-                                  bool add_master_fd_to_set = true;
+                                  // Set the flag to add master_fd to select set after master_set/fd_max are declared
+                                  add_master_fd_to_set = true;
                                 }
                               }
                             }
@@ -238,8 +239,6 @@ int main(int argc, char **argv) {
   int fd_max = server_fd;
   FD_ZERO(&master_set);
   FD_SET(server_fd, &master_set);
-  // If we need to add master_fd to the select set after handshake
-  bool add_master_fd_to_set = false;
   // After handshake, if we need to add master_fd to select set
   if (add_master_fd_to_set && master_fd >= 0) {
     FD_SET(master_fd, &master_set);
@@ -446,8 +445,16 @@ int main(int argc, char **argv) {
               cmd_upper = args[0];
               std::transform(cmd_upper.begin(), cmd_upper.end(), cmd_upper.begin(), ::toupper);
             }
-            // ...existing command handling logic for clients...
-            // (The rest of your client command handling code should remain here)
+            // Normal command handling for clients
+            CommandHandler handler(kv_store, expiry_store, list_store);
+            std::string response = handler.handle(args);
+            if (!response.empty()) {
+              if (write(fd, response.c_str(), response.size()) < 0) {
+                std::cerr << "Failed to send response to client fd=" << fd << "\n";
+                close(fd);
+                FD_CLR(fd, &master_set);
+              }
+            }
           }
         }
       }
