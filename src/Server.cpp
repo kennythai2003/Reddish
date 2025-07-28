@@ -320,7 +320,7 @@ int main(int argc, char **argv) {
           if (new_client_fd > fd_max) fd_max = new_client_fd;
           std::cout << "[DEBUG] Client connected: fd=" << new_client_fd << ", fd_max now " << fd_max << std::endl;
         } else if (is_replica && fd == master_fd) {
-          // Data from master (as replica)
+          // Data from master (as replica) - UPDATED SECTION
           char buffer[4096] = {0};
           int bytes_read = read(master_fd, buffer, sizeof(buffer));
           if (bytes_read <= 0) {
@@ -330,42 +330,105 @@ int main(int argc, char **argv) {
             master_fd = -1;
             continue;
           }
+          
+          // Append to master buffer
           master_leftover.append(buffer, bytes_read);
-          // Parse as many RESP arrays as possible
+          
+          // Parse as many complete RESP arrays as possible
           size_t pos = 0;
           while (pos < master_leftover.size()) {
+            // Look for start of array
             size_t arr_start = master_leftover.find('*', pos);
             if (arr_start == std::string::npos) break;
+            
+            // Parse array count
             size_t rn = master_leftover.find("\r\n", arr_start);
-            if (rn == std::string::npos) break;
+            if (rn == std::string::npos) break; // Need more data
+            
             int n_args = 0;
             try {
               n_args = std::stoi(master_leftover.substr(arr_start + 1, rn - arr_start - 1));
-            } catch (...) { pos = arr_start + 1; continue; }
+            } catch (...) { 
+              pos = arr_start + 1; 
+              continue; 
+            }
+            
+            if (n_args <= 0) {
+              pos = rn + 2;
+              continue;
+            }
+            
+            // Parse each argument
             std::vector<std::string> args;
             size_t cur = rn + 2;
-            bool parse_fail = false;
+            bool parse_complete = true;
+            
             for (int i = 0; i < n_args; ++i) {
-              if (cur >= master_leftover.size() || master_leftover[cur] != '$') { parse_fail = true; break; }
-              size_t rn1 = master_leftover.find("\r\n", cur);
-              if (rn1 == std::string::npos) { parse_fail = true; break; }
+              // Expect bulk string: $<length>\r\n<data>\r\n
+              if (cur >= master_leftover.size() || master_leftover[cur] != '$') {
+                parse_complete = false;
+                break;
+              }
+              
+              // Find length line ending
+              size_t len_end = master_leftover.find("\r\n", cur);
+              if (len_end == std::string::npos) {
+                parse_complete = false;
+                break;
+              }
+              
+              // Parse length
               int arglen = 0;
               try {
-                arglen = std::stoi(master_leftover.substr(cur + 1, rn1 - cur - 1));
-              } catch (...) { parse_fail = true; break; }
-              size_t start = rn1 + 2;
-              if (start + arglen > master_leftover.size()) { parse_fail = true; break; }
-              args.push_back(master_leftover.substr(start, arglen));
-              cur = start + arglen + 2;
+                arglen = std::stoi(master_leftover.substr(cur + 1, len_end - cur - 1));
+              } catch (...) {
+                parse_complete = false;
+                break;
+              }
+              
+              // Check if we have enough data for the argument
+              size_t data_start = len_end + 2;
+              if (data_start + arglen + 2 > master_leftover.size()) {
+                parse_complete = false;
+                break;
+              }
+              
+              // Extract argument
+              args.push_back(master_leftover.substr(data_start, arglen));
+              cur = data_start + arglen + 2; // Skip past \r\n
             }
-            if (parse_fail) { pos = arr_start + 1; continue; }
-            // Apply the command to local state (no response to master)
-            CommandHandler handler(kv_store, expiry_store, list_store);
-            handler.handle(args);
+            
+            if (!parse_complete) {
+              // Not enough data for complete command, wait for more
+              break;
+            }
+            
+            // We have a complete command, process it
+            if (!args.empty()) {
+              std::cout << "[REPLICA] Processing command from master: " << args[0];
+              for (size_t i = 1; i < args.size(); ++i) {
+                std::cout << " " << args[i];
+              }
+              std::cout << std::endl;
+              
+              // Apply the command to local state (no response sent back to master)
+              CommandHandler handler(kv_store, expiry_store, list_store);
+              std::string response = handler.handle(args);
+              
+              // For debugging: log what the response would have been
+              std::cout << "[REPLICA] Command processed, response would be: " << response.substr(0, 50);
+              if (response.length() > 50) std::cout << "...";
+              std::cout << std::endl;
+            }
+            
+            // Move to next command
             pos = cur;
           }
-          // Remove processed bytes
-          if (pos > 0) master_leftover = master_leftover.substr(pos);
+          
+          // Remove processed data from buffer
+          if (pos > 0) {
+            master_leftover = master_leftover.substr(pos);
+          }
         } else {
           // ...existing code for client data...
           char buffer[1024] = {0};
