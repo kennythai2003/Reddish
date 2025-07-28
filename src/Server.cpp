@@ -366,10 +366,10 @@ int main(int argc, char **argv) {
                 continue;
               }
               // Send empty RDB file as bulk string: $<len>\r\n<binary>
-              // Hex: 52 45 44 49 53 30 30 30 33 FA 00 05 63 68 65 63 6B 73 75 6D C7 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+              // Hex: 52 45 44 49 53 30 30 30 33 FA 00 05 63 68 65 63 6B 73 75 6D C7 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
               unsigned char empty_rdb[] = {
                 0x52, 0x45, 0x44, 0x49, 0x53, 0x30, 0x30, 0x30, 0x33, 0xFA, 0x00, 0x05, 0x63, 0x68, 0x65, 0x63, 0x6B, 0x73, 0x75, 0x6D, 0xC7, 0x00, 0x00, 0x00, 0x00,
-                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
               };
               size_t rdb_len = sizeof(empty_rdb);
               std::string rdb_header = "$" + std::to_string(rdb_len) + "\r\n";
