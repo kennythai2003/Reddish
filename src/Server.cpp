@@ -610,19 +610,24 @@ int main(int argc, char **argv) {
                       const std::string& last_id = last_ids[i];
                       auto sit = stream_store.find(key);
                       if (sit != stream_store.end()) {
-                        for (const auto& entry : sit->second) {
-                          if (last_id == "$" || entry.id > last_id) {
-                            can_fulfill = true;
-                            found_stream.push_back(key);
-                            found_id.push_back(entry.id);
-                            // Convert map to vector<string> alternating key/value
-                            std::vector<std::string> kv_fields;
-                            for (const auto& kv : entry.fields) {
-                              kv_fields.push_back(kv.first);
-                              kv_fields.push_back(kv.second);
+                        if (last_id == "$") {
+                          // If last_id is $, do not return any entry immediately (must block)
+                          continue;
+                        } else {
+                          for (const auto& entry : sit->second) {
+                            if (entry.id > last_id) {
+                              can_fulfill = true;
+                              found_stream.push_back(key);
+                              found_id.push_back(entry.id);
+                              // Convert map to vector<string> alternating key/value
+                              std::vector<std::string> kv_fields;
+                              for (const auto& kv : entry.fields) {
+                                kv_fields.push_back(kv.first);
+                                kv_fields.push_back(kv.second);
+                              }
+                              found_fields.push_back(kv_fields);
+                              break;
                             }
-                            found_fields.push_back(kv_fields);
-                            break;
                           }
                         }
                       }
