@@ -726,32 +726,36 @@ int main(int argc, char **argv) {
                       if (it->stream_keys[i] == args[1]) { // args[1] is stream key
                         auto sit = stream_store.find(args[1]);
                         if (sit != stream_store.end() && !sit->second.empty()) {
-                          // Only unblock if stream grew since block (for $)
-                          bool should_unblock = false;
+                          // Find the correct entry to return
+                          const StreamEntry* entry_to_return = nullptr;
                           if (it->last_ids[i] == "$") {
                             // Only unblock if stream grew
                             if (sit->second.size() > it->stream_lengths_at_block[i]) {
-                              should_unblock = true;
+                              // The new entry is at index stream_lengths_at_block[i]
+                              if (sit->second.size() > it->stream_lengths_at_block[i]) {
+                                entry_to_return = &sit->second[it->stream_lengths_at_block[i]];
+                              }
                             }
                           } else {
                             // For explicit IDs, unblock if new entry's id > last_id
-                            const auto& entry = sit->second.back();
-                            if (entry.id > it->last_ids[i]) {
-                              should_unblock = true;
+                            for (const auto& entry : sit->second) {
+                              if (entry.id > it->last_ids[i]) {
+                                entry_to_return = &entry;
+                                break;
+                              }
                             }
                           }
-                          if (should_unblock) {
-                            const auto& entry = sit->second.back();
-                            std::cout << "[DEBUG] Unblocking XREAD client fd=" << it->fd << " for stream '" << args[1] << "' with entry id=" << entry.id << std::endl;
+                          if (entry_to_return) {
+                            std::cout << "[DEBUG] Unblocking XREAD client fd=" << it->fd << " for stream '" << args[1] << "' with entry id=" << entry_to_return->id << std::endl;
                             std::string resp = "*1\r\n";
                             resp += "*2\r\n";
                             resp += "$" + std::to_string(args[1].size()) + "\r\n" + args[1] + "\r\n";
                             resp += "*1\r\n";
                             resp += "*2\r\n";
-                            resp += "$" + std::to_string(entry.id.size()) + "\r\n" + entry.id + "\r\n";
+                            resp += "$" + std::to_string(entry_to_return->id.size()) + "\r\n" + entry_to_return->id + "\r\n";
                             // Convert map to vector<string> alternating key/value
                             std::vector<std::string> kv_fields;
-                            for (const auto& kv : entry.fields) {
+                            for (const auto& kv : entry_to_return->fields) {
                               kv_fields.push_back(kv.first);
                               kv_fields.push_back(kv.second);
                             }
