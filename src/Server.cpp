@@ -212,6 +212,11 @@ int main(int argc, char **argv) {
                   // Remove processed bytes
                   if (pos > 0) leftover = leftover.substr(pos);
                 }
+                // Debug: print kv_store after master sync
+                std::cout << "[DEBUG] Replica kv_store after master sync:" << std::endl;
+                for (const auto& kv : kv_store) {
+                  std::cout << "  '" << kv.first << "' => '" << kv.second << "'" << std::endl;
+                }
               }
             }
           }
