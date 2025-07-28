@@ -469,12 +469,31 @@ int main(int argc, char **argv) {
                 FD_CLR(fd, &master_set);
                 continue;
               }
-              // Minimal RDB file (copied from test output, 88 bytes)
-              std::string rdb = "$88\r\nREDIS0011\xFA\tredis-ver\x057.2.0\xFA\nredis-bits\xC0@\xFA\x05ctime\xC2m\x08\xBCe\xFA\x08used-mem\xB0\xC4\x10\x00\xFA\x0baof-base\xC0\x00\xFF\xF0n;\xFE\xC0\xFFZ\xA2";
-              if (write(fd, rdb.c_str(), rdb.size()) < 0) {
-                std::cerr << "Failed to send RDB to replica fd=" << fd << "\n";
+              // Minimal RDB file (exact 88 bytes, sent as raw bytes)
+              const unsigned char rdb[88] = {
+                0x52,0x45,0x44,0x49,0x53,0x30,0x30,0x31,0x31,0xFA,0x09,0x72,0x65,0x64,0x69,0x73,0x2D,0x76,0x65,0x72,
+                0x05,0x37,0x2E,0x32,0x2E,0x30,0xFA,0x0A,0x72,0x65,0x64,0x69,0x73,0x2D,0x62,0x69,0x74,0x73,0xC0,0x40,
+                0xFA,0x05,0x63,0x74,0x69,0x6D,0x65,0xC2,0x6D,0x08,0xBC,0x65,0xFA,0x08,0x75,0x73,0x65,0x64,0x2D,0x6D,
+                0x65,0x6D,0xB0,0xC4,0x10,0x00,0xFA,0x0B,0x61,0x6F,0x66,0x2D,0x62,0x61,0x73,0x65,0xC0,0x00,0xFF,0xF0,
+                0x6E,0x3B,0xFE,0xC0,0xFF,0x5A,0xA2
+              };
+              std::string rdb_header = "$88\r\n";
+              if (write(fd, rdb_header.c_str(), rdb_header.size()) < 0) {
+                std::cerr << "Failed to send RDB header to replica fd=" << fd << "\n";
                 close(fd);
                 FD_CLR(fd, &master_set);
+                continue;
+              }
+              ssize_t rdb_written = 0;
+              while (rdb_written < 88) {
+                ssize_t n = write(fd, rdb + rdb_written, 88 - rdb_written);
+                if (n <= 0) {
+                  std::cerr << "Failed to send RDB to replica fd=" << fd << "\n";
+                  close(fd);
+                  FD_CLR(fd, &master_set);
+                  break;
+                }
+                rdb_written += n;
               }
               continue;
             }
