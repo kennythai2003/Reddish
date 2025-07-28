@@ -543,6 +543,30 @@ int main(int argc, char **argv) {
                     replica_fds.push_back(fd);
                   }
                 }
+              // Propagate write commands to all replicas
+              // Only propagate after handshake (i.e., fd is not a replica)
+              // Only propagate write commands (SET, RPUSH, LPUSH, XADD, INCR, etc.)
+              static const std::vector<std::string> write_cmds = {"SET", "RPUSH", "LPUSH", "XADD", "INCR", "DEL"};
+              if (std::find(write_cmds.begin(), write_cmds.end(), cmd_upper) != write_cmds.end() && !replica_fds.empty()) {
+                // Reconstruct the original RESP command
+                std::string resp_cmd = "*" + std::to_string(args.size()) + "\r\n";
+                for (const auto& arg : args) {
+                  resp_cmd += "$" + std::to_string(arg.size()) + "\r\n" + arg + "\r\n";
+                }
+                // Send to all replicas
+                for (auto it = replica_fds.begin(); it != replica_fds.end(); ) {
+                  int rfd = *it;
+                  ssize_t w = write(rfd, resp_cmd.c_str(), resp_cmd.size());
+                  if (w < 0) {
+                    std::cerr << "Failed to propagate to replica fd=" << rfd << ", removing from list." << std::endl;
+                    close(rfd);
+                    FD_CLR(rfd, &master_set);
+                    it = replica_fds.erase(it);
+                  } else {
+                    ++it;
+                  }
+                }
+              }
               }
               pos = cur;
             }
