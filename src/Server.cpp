@@ -183,8 +183,9 @@ int main(int argc, char **argv) {
                                     remaining -= nr;
                                   }
                                   std::cout << "Received complete RDB file from master\n";
-                                  // Set the flag to add master_fd to select set after master_set/fd_max are declared
-                                  add_master_fd_to_set = true;
+                                  // Immediately add master_fd to select set and update fd_max
+                                  FD_SET(master_fd, &master_set);
+                                  if (master_fd > fd_max) fd_max = master_fd;
                                 }
                               }
                             }
