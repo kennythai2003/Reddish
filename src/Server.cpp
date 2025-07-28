@@ -774,11 +774,16 @@ int main(int argc, char **argv) {
             }
             
             if (!response.empty()) {
+              std::cout << "Sending response to client fd=" << fd << ": " << response << std::endl;
               if (write(fd, response.c_str(), response.size()) < 0) {
                 std::cerr << "Failed to send response to client fd=" << fd << "\n";
                 close(fd);
                 FD_CLR(fd, &master_set);
               }
+            } else {
+              std::cout << "No response generated for client fd=" << fd << " (command: ";
+              for (const auto& a : args) std::cout << a << " ";
+              std::cout << ")\n";
             }
           }
         }
