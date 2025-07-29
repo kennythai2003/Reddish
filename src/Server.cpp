@@ -103,6 +103,38 @@ void start_replication_loop(int master_fd,
     std::unordered_map<std::string, std::vector<std::string>>& list_store) {
     std::string buffer;
     char temp[1024];
+    // --- Step 1: Read and skip the RDB file (sent as RESP bulk string) ---
+    bool rdb_skipped = false;
+    while (!rdb_skipped) {
+        ssize_t n = read(master_fd, temp, sizeof(temp));
+        if (n <= 0) {
+            std::cerr << "Replication socket closed or failed (before RDB skip).\n";
+            close(master_fd);
+            return;
+        }
+        buffer.append(temp, n);
+        // Try to parse RESP bulk string header: $<len>\r\n
+        size_t pos = 0;
+        if (!buffer.empty() && buffer[0] == '$') {
+            size_t crlf = buffer.find("\r\n");
+            if (crlf != std::string::npos) {
+                std::string len_str = buffer.substr(1, crlf - 1);
+                int rdb_len = std::stoi(len_str);
+                size_t total_needed = crlf + 2 + rdb_len + 2; // header + data + trailing CRLF
+                if (buffer.size() < total_needed) {
+                    // Need more data
+                    continue;
+                }
+                // Skip the RDB bulk string
+                buffer = buffer.substr(total_needed);
+                rdb_skipped = true;
+                break;
+            }
+        }
+        // If not enough data for header, keep reading
+    }
+
+    // --- Step 2: Process propagated commands as RESP arrays ---
     while (true) {
         ssize_t n = read(master_fd, temp, sizeof(temp));
         if (n <= 0) {
