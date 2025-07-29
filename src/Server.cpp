@@ -92,11 +92,13 @@ int main(int argc, char **argv) {
     return 1;
   }
   
-  // Parse --port and --replicaof flags if present
+  // Parse command line arguments
   int port = 6379;
   bool is_replica = false;
   std::string master_host;
   int master_port = 0;
+  std::string rdb_dir = "/tmp/redis-data";  // Default RDB directory
+  std::string rdb_filename = "dump.rdb";   // Default RDB filename
   for (int i = 1; i < argc; ++i) {
     if (std::string(argv[i]) == "--port" && i + 1 < argc) {
       port = std::atoi(argv[i + 1]);
@@ -114,6 +116,12 @@ int main(int argc, char **argv) {
         master_host = arg;
         if (i + 2 < argc) master_port = std::atoi(argv[i + 2]);
       }
+    }
+    if (std::string(argv[i]) == "--dir" && i + 1 < argc) {
+      rdb_dir = argv[i + 1];
+    }
+    if (std::string(argv[i]) == "--dbfilename" && i + 1 < argc) {
+      rdb_filename = argv[i + 1];
     }
   }
   // If replica, connect to master and send PING handshake
@@ -904,6 +912,43 @@ int main(int argc, char **argv) {
                 std::cerr << "Failed to send response to client fd=" << fd << "\n";
                 close(fd);
                 FD_CLR(fd, &master_set);
+              }
+              continue;
+            }
+            
+            // CONFIG GET command handling
+            if (!args.empty() && cmd_upper == "CONFIG" && args.size() == 3 && args[1] == "GET") {
+              std::string param = args[2];
+              std::string param_value;
+              bool param_found = false;
+              
+              if (param == "dir") {
+                param_value = rdb_dir;
+                param_found = true;
+              } else if (param == "dbfilename") {
+                param_value = rdb_filename;
+                param_found = true;
+              }
+              
+              if (param_found) {
+                // Return RESP array with parameter name and value
+                std::string response = "*2\r\n";
+                response += "$" + std::to_string(param.size()) + "\r\n" + param + "\r\n";
+                response += "$" + std::to_string(param_value.size()) + "\r\n" + param_value + "\r\n";
+                
+                if (write(fd, response.c_str(), response.size()) < 0) {
+                  std::cerr << "Failed to send response to client fd=" << fd << "\n";
+                  close(fd);
+                  FD_CLR(fd, &master_set);
+                }
+              } else {
+                // Unknown parameter
+                std::string response = "*0\r\n";
+                if (write(fd, response.c_str(), response.size()) < 0) {
+                  std::cerr << "Failed to send response to client fd=" << fd << "\n";
+                  close(fd);
+                  FD_CLR(fd, &master_set);
+                }
               }
               continue;
             }
