@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <queue>
 #include <vector>
+#include <set>
 
 #include <fcntl.h>
 #include <tuple>
@@ -42,9 +43,21 @@ struct XreadWaiter {
     std::vector<std::string> last_ids;
 };
 
+struct WaitRequest {
+    int client_fd;
+    int expected_replicas;
+    double timeout;
+    TimePoint start_time;
+    size_t target_offset;
+    std::set<int> pending_replicas;  // replica fds that haven't acked yet
+    std::set<int> acked_replicas;    // replica fds that have acked
+};
+
 int main(int argc, char **argv) {
   // Track all connected replica fds
   std::vector<int> replica_fds;
+  // Track master replication offset
+  size_t master_offset = 0;
   std::unordered_map<std::string, std::string> kv_store;
   // Store expiry as milliseconds since epoch
   std::unordered_map<std::string, std::chrono::steady_clock::time_point> expiry_store;
@@ -58,6 +71,8 @@ int main(int argc, char **argv) {
   std::unordered_map<int, std::pair<TimePoint, double>> client_waiting_time;
   // For XREAD blocking
   std::vector<XreadWaiter> xread_waiting_clients;
+  // For WAIT commands
+  std::vector<WaitRequest> pending_wait_requests;
   
   // Flush after every std::cout / std::cerr
   std::cout << std::unitbuf;
@@ -252,6 +267,16 @@ int main(int argc, char **argv) {
       }
     }
     
+    // Check WAIT timeouts
+    for (const auto& w : pending_wait_requests) {
+      if (w.timeout > 0) {
+        double elapsed = std::chrono::duration<double>(now - w.start_time).count();
+        double remain = w.timeout - elapsed;
+        if (remain < 0) remain = 0;
+        if (min_timeout < 0 || remain < min_timeout) min_timeout = remain;
+      }
+    }
+    
     if (min_timeout >= 0) {
       timeout_val.tv_sec = (int)min_timeout;
       timeout_val.tv_usec = (int)((min_timeout - (int)min_timeout) * 1e6);
@@ -303,6 +328,27 @@ int main(int argc, char **argv) {
         }
       }
       ++xread_it;
+    }
+    
+    // Handle WAIT timeouts
+    auto wait_it = pending_wait_requests.begin();
+    while (wait_it != pending_wait_requests.end()) {
+      const WaitRequest& w = *wait_it;
+      if (w.timeout > 0) {
+        double elapsed = std::chrono::duration<double>(now - w.start_time).count();
+        if (elapsed >= w.timeout) {
+          // Timeout expired, respond with current ack count
+          std::string response = ":" + std::to_string(w.acked_replicas.size()) + "\r\n";
+          if (write(w.client_fd, response.c_str(), response.size()) < 0) {
+            std::cerr << "Failed to send WAIT timeout response to client fd=" << w.client_fd << "\n";
+            close(w.client_fd);
+            FD_CLR(w.client_fd, &master_set);
+          }
+          wait_it = pending_wait_requests.erase(wait_it);
+          continue;
+        }
+      }
+      ++wait_it;
     }
     
     for (int fd = 0; fd <= fd_max; ++fd) {
@@ -484,6 +530,34 @@ int main(int argc, char **argv) {
               replica_fds.erase(replica_it);
               replica_count--;
               std::cout << "Replica disconnected: fd=" << fd << ", remaining replicas: " << replica_count << "\n";
+              
+              // Clean up WAIT requests involving this replica
+              for (auto wait_it = pending_wait_requests.begin(); wait_it != pending_wait_requests.end();) {
+                WaitRequest& wait_req = *wait_it;
+                wait_req.pending_replicas.erase(fd);
+                wait_req.acked_replicas.erase(fd);
+                
+                // Check if we should respond now that a replica disconnected
+                bool should_respond = false;
+                if ((int)wait_req.acked_replicas.size() >= wait_req.expected_replicas) {
+                  should_respond = true;
+                } else if (wait_req.pending_replicas.empty()) {
+                  // All remaining replicas responded
+                  should_respond = true;
+                }
+                
+                if (should_respond) {
+                  std::string response = ":" + std::to_string(wait_req.acked_replicas.size()) + "\r\n";
+                  if (write(wait_req.client_fd, response.c_str(), response.size()) < 0) {
+                    std::cerr << "Failed to send WAIT response to client fd=" << wait_req.client_fd << "\n";
+                    close(wait_req.client_fd);
+                    FD_CLR(wait_req.client_fd, &master_set);
+                  }
+                  wait_it = pending_wait_requests.erase(wait_it);
+                } else {
+                  ++wait_it;
+                }
+              }
             }
             // Clean up MULTI state
             client_in_multi.erase(fd);
@@ -498,6 +572,49 @@ int main(int argc, char **argv) {
             if (!args.empty()) {
               cmd_upper = args[0];
               std::transform(cmd_upper.begin(), cmd_upper.end(), cmd_upper.begin(), ::toupper);
+            }
+
+            // Handle REPLCONF ACK responses from replicas
+            if (!args.empty() && cmd_upper == "REPLCONF" && args.size() == 3 && args[1] == "ACK") {
+              size_t replica_offset = std::stoull(args[2]);
+              
+              // Process pending WAIT requests
+              for (auto wait_it = pending_wait_requests.begin(); wait_it != pending_wait_requests.end();) {
+                WaitRequest& wait_req = *wait_it;
+                
+                // Check if this replica was pending for this WAIT request
+                if (wait_req.pending_replicas.count(fd)) {
+                  // Check if replica has caught up to target offset
+                  if (replica_offset >= wait_req.target_offset) {
+                    wait_req.pending_replicas.erase(fd);
+                    wait_req.acked_replicas.insert(fd);
+                  }
+                  
+                  // Check if we have enough acks or all replicas responded
+                  bool should_respond = false;
+                  if ((int)wait_req.acked_replicas.size() >= wait_req.expected_replicas) {
+                    should_respond = true;
+                  } else if (wait_req.pending_replicas.empty()) {
+                    // All replicas responded but not enough acks
+                    should_respond = true;
+                  }
+                  
+                  if (should_respond) {
+                    std::string response = ":" + std::to_string(wait_req.acked_replicas.size()) + "\r\n";
+                    if (write(wait_req.client_fd, response.c_str(), response.size()) < 0) {
+                      std::cerr << "Failed to send WAIT response to client fd=" << wait_req.client_fd << "\n";
+                      close(wait_req.client_fd);
+                      FD_CLR(wait_req.client_fd, &master_set);
+                    }
+                    wait_it = pending_wait_requests.erase(wait_it);
+                  } else {
+                    ++wait_it;
+                  }
+                } else {
+                  ++wait_it;
+                }
+              }
+              continue;
             }
 
             // REPLCONF handshake support (master side)
@@ -791,6 +908,56 @@ int main(int argc, char **argv) {
               continue;
             }
             
+            // WAIT command handling
+            if (!args.empty() && cmd_upper == "WAIT" && args.size() == 3) {
+              int expected_replicas = std::stoi(args[1]);
+              double timeout_ms = std::stod(args[2]);
+              
+              // If no replicas, return 0 immediately
+              if (replica_fds.empty()) {
+                std::string response = ":0\r\n";
+                if (write(fd, response.c_str(), response.size()) < 0) {
+                  std::cerr << "Failed to send response to client fd=" << fd << "\n";
+                  close(fd);
+                  FD_CLR(fd, &master_set);
+                }
+                continue;
+              }
+              
+              // Create WAIT request
+              WaitRequest wait_req;
+              wait_req.client_fd = fd;
+              wait_req.expected_replicas = expected_replicas;
+              wait_req.timeout = timeout_ms / 1000.0; // convert to seconds
+              wait_req.start_time = Clock::now();
+              wait_req.target_offset = master_offset;
+              
+              // Send REPLCONF GETACK to all replicas
+              std::string getack_cmd = "*3\r\n$8\r\nREPLCONF\r\n$6\r\nGETACK\r\n$1\r\n*\r\n";
+              for (int rfd : replica_fds) {
+                wait_req.pending_replicas.insert(rfd);
+                if (write(rfd, getack_cmd.c_str(), getack_cmd.size()) < 0) {
+                  std::cerr << "Failed to send GETACK to replica fd=" << rfd << "\n";
+                  // Remove this replica from pending
+                  wait_req.pending_replicas.erase(rfd);
+                }
+              }
+              
+              // If no replicas could receive GETACK, respond immediately
+              if (wait_req.pending_replicas.empty()) {
+                std::string response = ":0\r\n";
+                if (write(fd, response.c_str(), response.size()) < 0) {
+                  std::cerr << "Failed to send response to client fd=" << fd << "\n";
+                  close(fd);
+                  FD_CLR(fd, &master_set);
+                }
+                continue;
+              }
+              
+              pending_wait_requests.push_back(wait_req);
+              continue;
+            }
+            
             // Normal command handling
             CommandHandler handler(kv_store, expiry_store, list_store);
             std::string response = handler.handle(args);
@@ -804,6 +971,8 @@ int main(int argc, char **argv) {
               for (const auto& arg : args) {
                 resp += "$" + std::to_string(arg.size()) + "\r\n" + arg + "\r\n";
               }
+              // Update master offset with the size of this command
+              master_offset += resp.size();
               // Send to all replicas except the sender
               for (auto it = replica_fds.begin(); it != replica_fds.end(); ) {
                 int rfd = *it;

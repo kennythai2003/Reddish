@@ -443,10 +443,7 @@ std::string CommandHandler::handle(const std::vector<std::string>& args) {
             }
         }
         return resp;
-    } else if (cmd == "WAIT" && args.size() == 3) {
-        // WAIT command: WAIT <numreplicas> <timeout>
-        // Return the actual count of connected replicas
-        return ":" + std::to_string(replica_count) + "\r\n";
+    // WAIT command is handled in Server.cpp due to async nature
     }
     
     return "-ERR unknown command\r\n";
