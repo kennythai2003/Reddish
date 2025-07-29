@@ -1,12 +1,12 @@
 
 #pragma once
+
 #include <string>
 #include <vector>
 #include <unordered_map>
 #include <map>
 #include <chrono>
 
-// StreamEntry struct definition for use in both CommandHandler.cpp and Server.cpp
 struct StreamEntry {
     std::string id;
     std::map<std::string, std::string> fields;
