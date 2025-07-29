@@ -924,7 +924,20 @@ int main(int argc, char **argv) {
                 continue;
               }
               
-              // Create WAIT request
+              // If no commands have been sent yet (offset is 0), all replicas are caught up
+              if (master_offset == 0) {
+                int replica_count_available = (int)replica_fds.size();
+                int response_count = std::min(expected_replicas, replica_count_available);
+                std::string response = ":" + std::to_string(replica_count_available) + "\r\n";
+                if (write(fd, response.c_str(), response.size()) < 0) {
+                  std::cerr << "Failed to send response to client fd=" << fd << "\n";
+                  close(fd);
+                  FD_CLR(fd, &master_set);
+                }
+                continue;
+              }
+              
+              // Create WAIT request for when commands have been sent
               WaitRequest wait_req;
               wait_req.client_fd = fd;
               wait_req.expected_replicas = expected_replicas;
