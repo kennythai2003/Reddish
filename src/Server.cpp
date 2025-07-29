@@ -145,6 +145,12 @@ void start_replication_loop(int master_fd,
         try {
             std::vector<std::string> cmd = parse_resp(buffer);
             handle_command(-1, cmd, kv_store, expiry_store, list_store);
+            // Debug: print kv_store after each command
+            std::cout << "[REPL] kv_store after command: ";
+            for (const auto& kv : kv_store) {
+                std::cout << kv.first << "=" << kv.second << ", ";
+            }
+            std::cout << std::endl;
             size_t total_len = calc_total_resp_length(buffer);
             buffer = buffer.substr(total_len);
         } catch (const std::exception&) {
@@ -167,6 +173,12 @@ void start_replication_loop(int master_fd,
                 std::vector<std::string> cmd = parse_resp(buffer);
                 // Apply command to local state, do not reply
                 handle_command(-1, cmd, kv_store, expiry_store, list_store);
+                // Debug: print kv_store after each command
+                std::cout << "[REPL] kv_store after command: ";
+                for (const auto& kv : kv_store) {
+                    std::cout << kv.first << "=" << kv.second << ", ";
+                }
+                std::cout << std::endl;
                 size_t total_len = calc_total_resp_length(buffer);
                 buffer = buffer.substr(total_len);
             } catch (const std::exception&) {
@@ -783,7 +795,14 @@ int main(int argc, char **argv) {
               continue;
             }
             
-            // Normal command handling
+            // Debug: print kv_store before GET
+            if (!args.empty() && cmd_upper == "GET" && args.size() == 2) {
+                std::cout << "[MAIN] kv_store before GET: ";
+                for (const auto& kv : kv_store) {
+                    std::cout << kv.first << "=" << kv.second << ", ";
+                }
+                std::cout << std::endl;
+            }
             CommandHandler handler(kv_store, expiry_store, list_store);
             std::string response = handler.handle(args);
 
