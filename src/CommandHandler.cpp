@@ -440,6 +440,10 @@ std::string CommandHandler::handle(const std::vector<std::string>& args) {
             }
         }
         return resp;
+    } else if (cmd == "WAIT" && args.size() == 3) {
+        // WAIT command: WAIT <numreplicas> <timeout>
+        // For this stage, always return 0 (hardcoded)
+        return ":0\r\n";
     }
     
     return "-ERR unknown command\r\n";
