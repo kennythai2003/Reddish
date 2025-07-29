@@ -29,7 +29,7 @@ extern std::unordered_map<std::string, std::vector<StreamEntry>> stream_store;
 extern int replica_count;
 
 // Simple RDB file parser for loading keys
-bool loadRdbFile(const std::string& rdb_path, std::unordered_map<std::string, std::string>& kv_store) {
+bool loadRdbFile(const std::string& rdb_path, std::unordered_map<std::string, std::string>& kv_store, std::unordered_map<std::string, std::chrono::steady_clock::time_point>& expiry_store) {
     std::cout << "Attempting to load RDB file: " << rdb_path << std::endl;
     std::ifstream file(rdb_path, std::ios::binary);
     if (!file.is_open()) {
@@ -66,10 +66,45 @@ bool loadRdbFile(const std::string& rdb_path, std::unordered_map<std::string, st
         if (pos >= data.size()) break;
         
         uint8_t opcode = data[pos++];
+        std::chrono::steady_clock::time_point expiry_time = std::chrono::steady_clock::time_point::max(); // No expiry by default
         
         if (opcode == 0xFF) {
             // End of file
             break;
+        } else if (opcode == 0xFC) {
+            // Expiry time in milliseconds (8 bytes)
+            if (pos + 8 > data.size()) break;
+            uint64_t expiry_ms = 0;
+            for (int i = 0; i < 8; i++) {
+                expiry_ms |= (uint64_t)data[pos + i] << (i * 8);
+            }
+            pos += 8;
+            // Convert from epoch milliseconds to steady_clock time_point
+            auto now_system = std::chrono::system_clock::now();
+            auto now_steady = std::chrono::steady_clock::now();
+            auto epoch_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now_system.time_since_epoch()).count();
+            auto diff_ms = (int64_t)expiry_ms - epoch_ms;
+            expiry_time = now_steady + std::chrono::milliseconds(diff_ms);
+            // Read the next opcode (should be value type)
+            if (pos >= data.size()) break;
+            opcode = data[pos++];
+        } else if (opcode == 0xFD) {
+            // Expiry time in seconds (4 bytes)
+            if (pos + 4 > data.size()) break;
+            uint32_t expiry_sec = 0;
+            for (int i = 0; i < 4; i++) {
+                expiry_sec |= (uint32_t)data[pos + i] << (i * 8);
+            }
+            pos += 4;
+            // Convert from epoch seconds to steady_clock time_point
+            auto now_system = std::chrono::system_clock::now();
+            auto now_steady = std::chrono::steady_clock::now();
+            auto epoch_sec = std::chrono::duration_cast<std::chrono::seconds>(now_system.time_since_epoch()).count();
+            auto diff_sec = (int64_t)expiry_sec - epoch_sec;
+            expiry_time = now_steady + std::chrono::seconds(diff_sec);
+            // Read the next opcode (should be value type)
+            if (pos >= data.size()) break;
+            opcode = data[pos++];
         } else if (opcode == 0xFE) {
             // Database selector
             if (pos >= data.size()) break;
@@ -111,10 +146,11 @@ bool loadRdbFile(const std::string& rdb_path, std::unordered_map<std::string, st
                 pos += val_first_byte;
             }
             continue;
-        } else {
-            // This should be a value type
-            // For simple string values (type 0)
-            if (opcode == 0) {
+        }
+        
+        // At this point, opcode should be a value type
+        // For simple string values (type 0)
+        if (opcode == 0) {
                 // Read key
                 if (pos >= data.size()) break;
                 uint8_t key_len = data[pos++];
@@ -131,11 +167,17 @@ bool loadRdbFile(const std::string& rdb_path, std::unordered_map<std::string, st
                 
                 // Store in key-value store
                 kv_store[key] = value;
-                std::cout << "Loaded key: " << key << " = " << value << std::endl;
-            } else {
-                // Unknown or unsupported type, skip
-                break;
-            }
+                
+                // Store expiry if it was set
+                if (expiry_time != std::chrono::steady_clock::time_point::max()) {
+                    expiry_store[key] = expiry_time;
+                    std::cout << "Loaded key with expiry: " << key << " = " << value << std::endl;
+                } else {
+                    std::cout << "Loaded key: " << key << " = " << value << std::endl;
+                }
+        } else {
+            // Unknown or unsupported type, skip
+            break;
         }
     }
     
@@ -243,7 +285,7 @@ int main(int argc, char **argv) {
   
   // Load RDB file if it exists
   std::string rdb_full_path = rdb_dir + "/" + rdb_filename;
-  loadRdbFile(rdb_full_path, kv_store);
+  loadRdbFile(rdb_full_path, kv_store, expiry_store);
   
   // If replica, connect to master and send PING handshake
   int master_fd = -1;
