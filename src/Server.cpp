@@ -102,6 +102,7 @@ int main(int argc, char **argv) {
   int master_fd = -1;
   bool rdb_received = false;
   std::string master_buffer;
+  size_t replica_offset = 0; // Track bytes processed from master
   
   if (is_replica && !master_host.empty() && master_port > 0) {
     struct addrinfo hints, *res;
@@ -400,25 +401,36 @@ int main(int argc, char **argv) {
                 }
                 
                 if (complete && !args.empty()) {
+                  // Calculate the byte size of this command (from start position to current position)
+                  size_t command_bytes = current_pos - pos;
+                  
                   // Convert command to uppercase for comparison
                   std::string cmd_upper = args[0];
                   std::transform(cmd_upper.begin(), cmd_upper.end(), cmd_upper.begin(), ::toupper);
                   
+                  std::cout << "Processing command: " << cmd_upper << " (" << command_bytes << " bytes, offset before: " << replica_offset << ")\n";
+                  
                   // Handle REPLCONF GETACK command - the only command that gets a response from replica
                   if (cmd_upper == "REPLCONF" && args.size() == 3 && 
                       args[1] == "GETACK" && args[2] == "*") {
-                    // Send REPLCONF ACK 0 response
-                    std::string ack_response = "*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$1\r\n0\r\n";
+                    // Send REPLCONF ACK response with current offset (before processing this command)
+                    std::string offset_str = std::to_string(replica_offset);
+                    std::string ack_response = "*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$" + 
+                                               std::to_string(offset_str.size()) + "\r\n" + offset_str + "\r\n";
                     if (write(master_fd, ack_response.c_str(), ack_response.size()) < 0) {
                       std::cerr << "Failed to send ACK response to master\n";
                     } else {
-                      std::cout << "Sent REPLCONF ACK 0 to master\n";
+                      std::cout << "Sent REPLCONF ACK " << replica_offset << " to master\n";
                     }
+                    // Update offset AFTER responding (GETACK itself counts toward offset)
+                    replica_offset += command_bytes;
                   } else {
                     // Process other commands silently (no response to master)
                     CommandHandler handler(kv_store, expiry_store, list_store);
                     handler.handle(args);
                     std::cout << "Processed propagated command: " << args[0] << "\n";
+                    // Update offset for regular commands
+                    replica_offset += command_bytes;
                   }
                   pos = current_pos;
                 } else {
