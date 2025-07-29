@@ -18,7 +18,6 @@
 
 #include "RespParser.h"
 #include "CommandHandler.h"
-#include <thread>
 
 // Allow access to global stream_store defined in CommandHandler.cpp
 extern std::unordered_map<std::string, std::vector<StreamEntry>> stream_store;
@@ -39,156 +38,6 @@ struct XreadWaiter {
     std::vector<std::string> stream_keys;
     std::vector<std::string> last_ids;
 };
-
-// Helper: read a line (ending with CRLF) from a string, updating pos
-std::string read_line(const std::string& data, size_t& pos) {
-    size_t end = data.find("\r\n", pos);
-    if (end == std::string::npos) throw std::runtime_error("incomplete line");
-    std::string line = data.substr(pos, end - pos);
-    pos = end + 2;
-    return line;
-}
-
-// Helper: calculate total RESP array length in bytes (for one command)
-size_t calc_total_resp_length(const std::string& data) {
-    size_t pos = 0;
-    if (data.empty() || data[0] != '*') throw std::runtime_error("not an array");
-    std::string first_line = read_line(data, pos); // e.g., "*3"
-    int num_elements = std::stoi(first_line.substr(1));
-    for (int i = 0; i < num_elements; ++i) {
-        if (pos >= data.size() || data[pos] != '$') throw std::runtime_error("not a bulk string");
-        std::string len_line = read_line(data, pos); // e.g., "$3"
-        int str_len = std::stoi(len_line.substr(1));
-        if (pos + str_len + 2 > data.size()) throw std::runtime_error("incomplete bulk string");
-        pos += str_len + 2; // content + CRLF
-    }
-    return pos;
-}
-
-// Helper: parse a RESP array from a string (returns vector of strings)
-std::vector<std::string> parse_resp(const std::string& data) {
-    size_t pos = 0;
-    if (data.empty() || data[0] != '*') throw std::runtime_error("not an array");
-    std::string first_line = read_line(data, pos); // e.g., "*3"
-    int num_elements = std::stoi(first_line.substr(1));
-    std::vector<std::string> result;
-    for (int i = 0; i < num_elements; ++i) {
-        if (pos >= data.size() || data[pos] != '$') throw std::runtime_error("not a bulk string");
-        std::string len_line = read_line(data, pos); // e.g., "$3"
-        int str_len = std::stoi(len_line.substr(1));
-        if (pos + str_len + 2 > data.size()) throw std::runtime_error("incomplete bulk string");
-        std::string val = data.substr(pos, str_len);
-        pos += str_len + 2; // skip value and CRLF
-        result.push_back(val);
-    }
-    return result;
-}
-
-// Helper: handle a command (like CommandHandler::handle), but does not send a response if fd == -1
-void handle_command(int fd, const std::vector<std::string>& args,
-    std::unordered_map<std::string, std::string>& kv_store,
-    std::unordered_map<std::string, std::chrono::steady_clock::time_point>& expiry_store,
-    std::unordered_map<std::string, std::vector<std::string>>& list_store) {
-    CommandHandler handler(kv_store, expiry_store, list_store);
-    std::string response = handler.handle(args);
-    if (fd >= 0 && !response.empty()) {
-        write(fd, response.c_str(), response.size());
-    }
-}
-
-// Replication loop: read and apply commands from master
-void start_replication_loop(int master_fd,
-    std::unordered_map<std::string, std::string>& kv_store,
-    std::unordered_map<std::string, std::chrono::steady_clock::time_point>& expiry_store,
-    std::unordered_map<std::string, std::vector<std::string>>& list_store) {
-    std::string buffer;
-    char temp[1024];
-    // --- Step 1: Read and skip the +FULLRESYNC line and the RDB file (sent as RESP bulk string) ---
-    bool rdb_skipped = false;
-    while (!rdb_skipped) {
-        ssize_t n = read(master_fd, temp, sizeof(temp));
-        if (n <= 0) {
-            std::cerr << "Replication socket closed or failed (before RDB skip).\n";
-            close(master_fd);
-            return;
-        }
-        buffer.append(temp, n);
-        // Step 1a: Remove +FULLRESYNC line if present
-        while (!buffer.empty() && buffer[0] == '+') {
-            size_t crlf = buffer.find("\r\n");
-            if (crlf == std::string::npos) break; // incomplete line
-            buffer = buffer.substr(crlf + 2);
-        }
-        // Step 1b: Try to parse RESP bulk string header: $<len>\r\n
-        size_t pos = 0;
-        if (!buffer.empty() && buffer[0] == '$') {
-            size_t crlf = buffer.find("\r\n");
-            if (crlf != std::string::npos) {
-                std::string len_str = buffer.substr(1, crlf - 1);
-                int rdb_len = std::stoi(len_str);
-                size_t total_needed = crlf + 2 + rdb_len + 2; // header + data + trailing CRLF
-                if (buffer.size() < total_needed) {
-                    // Need more data
-                    continue;
-                }
-                // Skip the RDB bulk string
-                buffer = buffer.substr(total_needed);
-                rdb_skipped = true;
-                // Do not break; process any remaining buffer as commands below
-            }
-        }
-        // If not enough data for header, keep reading
-    }
-
-    // --- Step 2: Process any leftover data in buffer as RESP commands ---
-    while (!buffer.empty()) {
-        try {
-            std::vector<std::string> cmd = parse_resp(buffer);
-            handle_command(-1, cmd, kv_store, expiry_store, list_store);
-            // Debug: print kv_store after each command
-            std::cout << "[REPL] kv_store after command: ";
-            for (const auto& kv : kv_store) {
-                std::cout << kv.first << "=" << kv.second << ", ";
-            }
-            std::cout << std::endl;
-            size_t total_len = calc_total_resp_length(buffer);
-            buffer = buffer.substr(total_len);
-        } catch (const std::exception&) {
-            // Incomplete command, wait for more data
-            break;
-        }
-    }
-
-    // --- Step 2: Process propagated commands as RESP arrays ---
-    while (true) {
-        ssize_t n = read(master_fd, temp, sizeof(temp));
-        if (n <= 0) {
-            std::cerr << "Replication socket closed or failed.\n";
-            break;
-        }
-        buffer.append(temp, n);
-        // Process multiple RESP commands in buffer
-        while (!buffer.empty()) {
-            try {
-                std::vector<std::string> cmd = parse_resp(buffer);
-                // Apply command to local state, do not reply
-                handle_command(-1, cmd, kv_store, expiry_store, list_store);
-                // Debug: print kv_store after each command
-                std::cout << "[REPL] kv_store after command: ";
-                for (const auto& kv : kv_store) {
-                    std::cout << kv.first << "=" << kv.second << ", ";
-                }
-                std::cout << std::endl;
-                size_t total_len = calc_total_resp_length(buffer);
-                buffer = buffer.substr(total_len);
-            } catch (const std::exception&) {
-                // Incomplete command, wait for more data
-                break;
-            }
-        }
-    }
-    close(master_fd);
-}
 
 int main(int argc, char **argv) {
   // Track all connected replica fds
@@ -251,6 +100,9 @@ int main(int argc, char **argv) {
   }
   // If replica, connect to master and send PING handshake
   int master_fd = -1;
+  bool rdb_received = false;
+  std::string master_buffer;
+  
   if (is_replica && !master_host.empty() && master_port > 0) {
     struct addrinfo hints, *res;
     memset(&hints, 0, sizeof(hints));
@@ -299,6 +151,8 @@ int main(int argc, char **argv) {
                         // Now send PSYNC ? -1
                         std::string psync = "*3\r\n$5\r\nPSYNC\r\n$1\r\n?\r\n$2\r\n-1\r\n";
                         send(master_fd, psync.c_str(), psync.size(), 0);
+                        // Set to non-blocking for event loop
+                        fcntl(master_fd, F_SETFL, flags | O_NONBLOCK);
                       }
                     }
                   }
@@ -347,6 +201,12 @@ int main(int argc, char **argv) {
   int fd_max = server_fd;
   FD_ZERO(&master_set);
   FD_SET(server_fd, &master_set);
+  
+  // Add master_fd to select set if we're a replica
+  if (master_fd >= 0) {
+    FD_SET(master_fd, &master_set);
+    if (master_fd > fd_max) fd_max = master_fd;
+  }
 
   std::cout << "Server event loop started. Waiting for clients...\n";
 
@@ -354,14 +214,7 @@ int main(int argc, char **argv) {
   std::unordered_map<int, bool> client_in_multi;
   // Queued commands per client fd
   std::unordered_map<int, std::vector<std::vector<std::string>>> client_multi_queue;
-
-  // If running as a replica, start replication loop in a thread
-  std::thread repl_thread;
-  if (is_replica && master_fd >= 0) {
-    repl_thread = std::thread(start_replication_loop, master_fd, std::ref(kv_store), std::ref(expiry_store), std::ref(list_store));
-    repl_thread.detach();
-  }
-
+  // For this stage, we only need to track if MULTI was called, not queue commands
   while (true) {
     read_fds = master_set;
     // Compute select timeout for BLPOP and XREAD
@@ -460,6 +313,110 @@ int main(int argc, char **argv) {
           FD_SET(new_client_fd, &master_set);
           if (new_client_fd > fd_max) fd_max = new_client_fd;
           std::cout << "Client connected: fd=" << new_client_fd << "\n";
+        } else if (fd == master_fd && is_replica) {
+          // Data from master (replica mode)
+          char buffer[4096] = {0};
+          int bytes_read = read(fd, buffer, sizeof(buffer));
+          if (bytes_read <= 0) {
+            if (bytes_read < 0) std::cerr << "Replication socket closed or failed.\n";
+            close(master_fd);
+            FD_CLR(master_fd, &master_set);
+            master_fd = -1;
+          } else {
+            master_buffer.append(buffer, bytes_read);
+            
+            // Handle FULLRESYNC response and RDB
+            if (!rdb_received) {
+              size_t fullresync_pos = master_buffer.find("+FULLRESYNC");
+              if (fullresync_pos != std::string::npos) {
+                // Skip past FULLRESYNC line
+                size_t line_end = master_buffer.find("\r\n", fullresync_pos);
+                if (line_end != std::string::npos) {
+                  // Look for RDB bulk string
+                  size_t rdb_start = line_end + 2;
+                  if (rdb_start < master_buffer.size() && master_buffer[rdb_start] == '$') {
+                    // Parse RDB length
+                    size_t len_end = master_buffer.find("\r\n", rdb_start);
+                    if (len_end != std::string::npos) {
+                      std::string len_str = master_buffer.substr(rdb_start + 1, len_end - rdb_start - 1);
+                      int rdb_len = std::stoi(len_str);
+                      size_t rdb_data_start = len_end + 2;
+                      
+                      // Check if we have the full RDB
+                      if (rdb_data_start + rdb_len <= master_buffer.size()) {
+                        std::cout << "Received RDB file (" << rdb_len << " bytes)\n";
+                        rdb_received = true;
+                        // Remove processed data from buffer
+                        master_buffer = master_buffer.substr(rdb_data_start + rdb_len);
+                      }
+                    }
+                  }
+                }
+              }
+            }
+            
+            // Process propagated commands after RDB is received
+            if (rdb_received) {
+              size_t pos = 0;
+              while (pos < master_buffer.size()) {
+                // Try to parse one RESP array starting at pos
+                if (master_buffer[pos] != '*') {
+                  pos++;
+                  continue;
+                }
+                
+                // Find array length
+                size_t len_end = master_buffer.find("\r\n", pos);
+                if (len_end == std::string::npos) break;
+                
+                int array_len = std::stoi(master_buffer.substr(pos + 1, len_end - pos - 1));
+                size_t current_pos = len_end + 2;
+                std::vector<std::string> args;
+                bool complete = true;
+                
+                // Parse each element
+                for (int i = 0; i < array_len; i++) {
+                  if (current_pos >= master_buffer.size() || master_buffer[current_pos] != '$') {
+                    complete = false;
+                    break;
+                  }
+                  
+                  size_t elem_len_end = master_buffer.find("\r\n", current_pos);
+                  if (elem_len_end == std::string::npos) {
+                    complete = false;
+                    break;
+                  }
+                  
+                  int elem_len = std::stoi(master_buffer.substr(current_pos + 1, elem_len_end - current_pos - 1));
+                  size_t elem_start = elem_len_end + 2;
+                  
+                  if (elem_start + elem_len + 2 > master_buffer.size()) {
+                    complete = false;
+                    break;
+                  }
+                  
+                  args.push_back(master_buffer.substr(elem_start, elem_len));
+                  current_pos = elem_start + elem_len + 2;
+                }
+                
+                if (complete && !args.empty()) {
+                  // Process command without sending response
+                  CommandHandler handler(kv_store, expiry_store, list_store);
+                  handler.handle(args);
+                  std::cout << "Processed propagated command: " << args[0] << "\n";
+                  pos = current_pos;
+                } else {
+                  // Incomplete command, wait for more data
+                  break;
+                }
+              }
+              
+              // Remove processed data
+              if (pos > 0) {
+                master_buffer = master_buffer.substr(pos);
+              }
+            }
+          }
         } else {
           // Data from existing client
           char buffer[1024] = {0};
@@ -795,14 +752,7 @@ int main(int argc, char **argv) {
               continue;
             }
             
-            // Debug: print kv_store before GET
-            if (!args.empty() && cmd_upper == "GET" && args.size() == 2) {
-                std::cout << "[MAIN] kv_store before GET: ";
-                for (const auto& kv : kv_store) {
-                    std::cout << kv.first << "=" << kv.second << ", ";
-                }
-                std::cout << std::endl;
-            }
+            // Normal command handling
             CommandHandler handler(kv_store, expiry_store, list_store);
             std::string response = handler.handle(args);
 

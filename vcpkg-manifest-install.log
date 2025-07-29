@@ -11,4 +11,4 @@ asio provides CMake targets:
   find_package(asio CONFIG REQUIRED)
   target_link_libraries(main PRIVATE asio::asio)
 
-All requested installations completed successfully in: 74.2 us
+All requested installations completed successfully in: 84.1 us
