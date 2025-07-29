@@ -13,6 +13,8 @@
 #include <queue>
 #include <vector>
 #include <set>
+#include <fstream>
+#include <filesystem>
 
 #include <fcntl.h>
 #include <tuple>
@@ -25,6 +27,120 @@ extern std::unordered_map<std::string, std::vector<StreamEntry>> stream_store;
 
 // Allow access to global replica_count defined in CommandHandler.cpp
 extern int replica_count;
+
+// Simple RDB file parser for loading keys
+bool loadRdbFile(const std::string& rdb_path, std::unordered_map<std::string, std::string>& kv_store) {
+    std::cout << "Attempting to load RDB file: " << rdb_path << std::endl;
+    std::ifstream file(rdb_path, std::ios::binary);
+    if (!file.is_open()) {
+        // File doesn't exist, treat database as empty
+        std::cout << "RDB file not found: " << rdb_path << std::endl;
+        return false;
+    }
+    
+    // Read the entire file into memory
+    std::vector<uint8_t> data((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+    file.close();
+    
+    std::cout << "RDB file size: " << data.size() << " bytes" << std::endl;
+    
+    if (data.size() < 9) {
+        // File too small to be valid RDB
+        std::cout << "RDB file too small" << std::endl;
+        return false;
+    }
+    
+    size_t pos = 0;
+    
+    // Check magic string "REDIS"
+    if (std::string(data.begin(), data.begin() + 5) != "REDIS") {
+        return false;
+    }
+    pos += 5;
+    
+    // Skip version (4 bytes)
+    pos += 4;
+    
+    // Parse the rest of the file
+    while (pos < data.size()) {
+        if (pos >= data.size()) break;
+        
+        uint8_t opcode = data[pos++];
+        
+        if (opcode == 0xFF) {
+            // End of file
+            break;
+        } else if (opcode == 0xFE) {
+            // Database selector
+            if (pos >= data.size()) break;
+            uint8_t db_num = data[pos++];
+            // For now, only handle database 0
+            continue;
+        } else if (opcode == 0xFB) {
+            // Hash table size info - skip for now
+            // Read hash table size (encoded length)
+            if (pos >= data.size()) break;
+            uint8_t len_byte = data[pos++];
+            if ((len_byte & 0xC0) == 0xC0) {
+                // Skip additional bytes for length encoding
+                pos += 4; // Skip next 4 bytes for 32-bit int
+            }
+            // Skip expires hash table size
+            if (pos >= data.size()) break;
+            len_byte = data[pos++];
+            if ((len_byte & 0xC0) == 0xC0) {
+                pos += 4;
+            }
+            continue;
+        } else if (opcode == 0xFA) {
+            // Auxiliary fields - skip key and value
+            if (pos >= data.size()) break;
+            uint8_t key_len = data[pos++];
+            pos += key_len;
+            // Skip value - need to handle different encoding types
+            if (pos >= data.size()) break;
+            uint8_t val_first_byte = data[pos++];
+            if (val_first_byte == 0xC0) {
+                // Integer encoded value - 1 more byte
+                if (pos < data.size()) pos++;
+            } else if (val_first_byte == 0xC2) {
+                // 32-bit integer - 4 more bytes
+                pos += 4;
+            } else {
+                // String value - val_first_byte is the length
+                pos += val_first_byte;
+            }
+            continue;
+        } else {
+            // This should be a value type
+            // For simple string values (type 0)
+            if (opcode == 0) {
+                // Read key
+                if (pos >= data.size()) break;
+                uint8_t key_len = data[pos++];
+                if (pos + key_len > data.size()) break;
+                std::string key(data.begin() + pos, data.begin() + pos + key_len);
+                pos += key_len;
+                
+                // Read value
+                if (pos >= data.size()) break;
+                uint8_t val_len = data[pos++];
+                if (pos + val_len > data.size()) break;
+                std::string value(data.begin() + pos, data.begin() + pos + val_len);
+                pos += val_len;
+                
+                // Store in key-value store
+                kv_store[key] = value;
+                std::cout << "Loaded key: " << key << " = " << value << std::endl;
+            } else {
+                // Unknown or unsupported type, skip
+                break;
+            }
+        }
+    }
+    
+    return true;
+}
 
 using Clock = std::chrono::steady_clock;
 using TimePoint = std::chrono::time_point<Clock>;
@@ -124,6 +240,11 @@ int main(int argc, char **argv) {
       rdb_filename = argv[i + 1];
     }
   }
+  
+  // Load RDB file if it exists
+  std::string rdb_full_path = rdb_dir + "/" + rdb_filename;
+  loadRdbFile(rdb_full_path, kv_store);
+  
   // If replica, connect to master and send PING handshake
   int master_fd = -1;
   bool rdb_received = false;

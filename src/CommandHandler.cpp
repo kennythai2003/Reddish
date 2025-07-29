@@ -444,6 +444,33 @@ std::string CommandHandler::handle(const std::vector<std::string>& args) {
         }
         return resp;
     // WAIT command is handled in Server.cpp due to async nature
+    } else if (cmd == "KEYS" && args.size() == 2) {
+        // KEYS command: KEYS <pattern>
+        std::string pattern = args[1];
+        std::vector<std::string> matching_keys;
+        
+        // For now, support simple "*" pattern (match all keys)
+        if (pattern == "*") {
+            for (const auto& pair : kv_store) {
+                // Skip expired keys
+                if (!isExpired(pair.first)) {
+                    matching_keys.push_back(pair.first);
+                }
+            }
+        } else {
+            // For other patterns, could implement glob matching here
+            // For now, just exact match
+            if (kv_store.find(pattern) != kv_store.end() && !isExpired(pattern)) {
+                matching_keys.push_back(pattern);
+            }
+        }
+        
+        // Return RESP array
+        std::string response = "*" + std::to_string(matching_keys.size()) + "\r\n";
+        for (const std::string& key : matching_keys) {
+            response += "$" + std::to_string(key.size()) + "\r\n" + key + "\r\n";
+        }
+        return response;
     }
     
     return "-ERR unknown command\r\n";
