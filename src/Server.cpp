@@ -18,6 +18,7 @@
 
 #include "RespParser.h"
 #include "CommandHandler.h"
+#include <thread>
 
 // Allow access to global stream_store defined in CommandHandler.cpp
 extern std::unordered_map<std::string, std::vector<StreamEntry>> stream_store;
