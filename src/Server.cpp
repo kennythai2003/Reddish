@@ -103,7 +103,7 @@ void start_replication_loop(int master_fd,
     std::unordered_map<std::string, std::vector<std::string>>& list_store) {
     std::string buffer;
     char temp[1024];
-    // --- Step 1: Read and skip the RDB file (sent as RESP bulk string) ---
+    // --- Step 1: Read and skip the +FULLRESYNC line and the RDB file (sent as RESP bulk string) ---
     bool rdb_skipped = false;
     while (!rdb_skipped) {
         ssize_t n = read(master_fd, temp, sizeof(temp));
@@ -113,7 +113,13 @@ void start_replication_loop(int master_fd,
             return;
         }
         buffer.append(temp, n);
-        // Try to parse RESP bulk string header: $<len>\r\n
+        // Step 1a: Remove +FULLRESYNC line if present
+        while (!buffer.empty() && buffer[0] == '+') {
+            size_t crlf = buffer.find("\r\n");
+            if (crlf == std::string::npos) break; // incomplete line
+            buffer = buffer.substr(crlf + 2);
+        }
+        // Step 1b: Try to parse RESP bulk string header: $<len>\r\n
         size_t pos = 0;
         if (!buffer.empty() && buffer[0] == '$') {
             size_t crlf = buffer.find("\r\n");
