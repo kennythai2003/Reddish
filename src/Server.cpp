@@ -134,10 +134,23 @@ void start_replication_loop(int master_fd,
                 // Skip the RDB bulk string
                 buffer = buffer.substr(total_needed);
                 rdb_skipped = true;
-                break;
+                // Do not break; process any remaining buffer as commands below
             }
         }
         // If not enough data for header, keep reading
+    }
+
+    // --- Step 2: Process any leftover data in buffer as RESP commands ---
+    while (!buffer.empty()) {
+        try {
+            std::vector<std::string> cmd = parse_resp(buffer);
+            handle_command(-1, cmd, kv_store, expiry_store, list_store);
+            size_t total_len = calc_total_resp_length(buffer);
+            buffer = buffer.substr(total_len);
+        } catch (const std::exception&) {
+            // Incomplete command, wait for more data
+            break;
+        }
     }
 
     // --- Step 2: Process propagated commands as RESP arrays ---
