@@ -6,6 +6,9 @@
 // Make stream_store a global variable that persists across translation units
 std::unordered_map<std::string, std::vector<StreamEntry>> stream_store;
 
+// Global replica count that can be updated from Server.cpp
+int replica_count = 0;
+
 CommandHandler::CommandHandler(
     std::unordered_map<std::string, std::string>& kv,
     std::unordered_map<std::string, std::chrono::steady_clock::time_point>& expiry,
@@ -442,8 +445,8 @@ std::string CommandHandler::handle(const std::vector<std::string>& args) {
         return resp;
     } else if (cmd == "WAIT" && args.size() == 3) {
         // WAIT command: WAIT <numreplicas> <timeout>
-        // For this stage, always return 0 (hardcoded)
-        return ":0\r\n";
+        // Return the actual count of connected replicas
+        return ":" + std::to_string(replica_count) + "\r\n";
     }
     
     return "-ERR unknown command\r\n";

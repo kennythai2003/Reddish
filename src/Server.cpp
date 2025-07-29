@@ -22,6 +22,9 @@
 // Allow access to global stream_store defined in CommandHandler.cpp
 extern std::unordered_map<std::string, std::vector<StreamEntry>> stream_store;
 
+// Allow access to global replica_count defined in CommandHandler.cpp
+extern int replica_count;
+
 using Clock = std::chrono::steady_clock;
 using TimePoint = std::chrono::time_point<Clock>;
 
@@ -475,6 +478,13 @@ int main(int argc, char **argv) {
                 ++xread_it;
               }
             }
+            // Clean up replica tracking if disconnected client was a replica
+            auto replica_it = std::find(replica_fds.begin(), replica_fds.end(), fd);
+            if (replica_it != replica_fds.end()) {
+              replica_fds.erase(replica_it);
+              replica_count--;
+              std::cout << "Replica disconnected: fd=" << fd << ", remaining replicas: " << replica_count << "\n";
+            }
             // Clean up MULTI state
             client_in_multi.erase(fd);
             close(fd);
@@ -528,6 +538,7 @@ int main(int argc, char **argv) {
               }
               // Add this fd to the list of replica connections
               replica_fds.push_back(fd);
+              replica_count++;
               continue;
             }
             // Transaction support: MULTI/EXEC
@@ -803,6 +814,7 @@ int main(int argc, char **argv) {
                   close(rfd);
                   FD_CLR(rfd, &master_set);
                   it = replica_fds.erase(it);
+                  replica_count--;
                 } else {
                   ++it;
                 }
