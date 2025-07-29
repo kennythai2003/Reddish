@@ -400,10 +400,26 @@ int main(int argc, char **argv) {
                 }
                 
                 if (complete && !args.empty()) {
-                  // Process command without sending response
-                  CommandHandler handler(kv_store, expiry_store, list_store);
-                  handler.handle(args);
-                  std::cout << "Processed propagated command: " << args[0] << "\n";
+                  // Convert command to uppercase for comparison
+                  std::string cmd_upper = args[0];
+                  std::transform(cmd_upper.begin(), cmd_upper.end(), cmd_upper.begin(), ::toupper);
+                  
+                  // Handle REPLCONF GETACK command - the only command that gets a response from replica
+                  if (cmd_upper == "REPLCONF" && args.size() == 3 && 
+                      args[1] == "GETACK" && args[2] == "*") {
+                    // Send REPLCONF ACK 0 response
+                    std::string ack_response = "*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$1\r\n0\r\n";
+                    if (write(master_fd, ack_response.c_str(), ack_response.size()) < 0) {
+                      std::cerr << "Failed to send ACK response to master\n";
+                    } else {
+                      std::cout << "Sent REPLCONF ACK 0 to master\n";
+                    }
+                  } else {
+                    // Process other commands silently (no response to master)
+                    CommandHandler handler(kv_store, expiry_store, list_store);
+                    handler.handle(args);
+                    std::cout << "Processed propagated command: " << args[0] << "\n";
+                  }
                   pos = current_pos;
                 } else {
                   // Incomplete command, wait for more data
