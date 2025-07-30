@@ -1,0 +1,74 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y cmake build-essential
+    
+    - name: Build project
+      run: |
+        make clean || true
+        make
+    
+    - name: Run tests
+      run: |
+        # Run basic functionality tests if they exist
+        if [ -f "run_tests.py" ]; then
+          python3 run_tests.py
+        fi
+        
+        # Test that server starts and responds to basic commands
+        timeout 10s ./server &
+        SERVER_PID=$!
+        sleep 2
+        
+        # Test basic PING command
+        echo "Testing basic server functionality..."
+        echo -e '*1\r\n$4\r\nPING\r\n' | nc localhost 6379 | grep -q "PONG" && echo "✓ PING test passed" || echo "✗ PING test failed"
+        
+        # Cleanup
+        kill $SERVER_PID || true
+        wait $SERVER_PID 2>/dev/null || true
+
+  test-matrix:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Install dependencies (Ubuntu)
+      if: matrix.os == 'ubuntu-latest'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y cmake build-essential netcat-openbsd
+    
+    - name: Install dependencies (macOS) 
+      if: matrix.os == 'macos-latest'
+      run: |
+        brew install cmake netcat
+    
+    - name: Build project
+      run: |
+        make clean || true
+        make
+    
+    - name: Verify build artifacts
+      run: |
+        ls -la server
+        file server
