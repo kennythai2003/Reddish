@@ -16,32 +16,27 @@ jobs:
     - name: Install dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y cmake build-essential
+        sudo apt-get install -y cmake build-essential netcat-openbsd
+    
+    - name: Install vcpkg
+      run: |
+        git clone https://github.com/Microsoft/vcpkg.git
+        ./vcpkg/bootstrap-vcpkg.sh
+        export VCPKG_ROOT=$(pwd)/vcpkg
+        echo "VCPKG_ROOT=$(pwd)/vcpkg" >> $GITHUB_ENV
     
     - name: Build project
       run: |
-        make clean || true
-        make
+        cmake -B build -S . -DCMAKE_TOOLCHAIN_FILE=$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake
+        cmake --build ./build
     
-    - name: Run tests
+    - name: Run basic tests
       run: |
-        # Run basic functionality tests if they exist
-        if [ -f "run_tests.py" ]; then
-          python3 run_tests.py
-        fi
-        
-        # Test that server starts and responds to basic commands
-        timeout 10s ./server &
-        SERVER_PID=$!
-        sleep 2
-        
-        # Test basic PING command
-        echo "Testing basic server functionality..."
-        echo -e '*1\r\n$4\r\nPING\r\n' | nc localhost 6379 | grep -q "PONG" && echo "✓ PING test passed" || echo "✗ PING test failed"
-        
-        # Cleanup
-        kill $SERVER_PID || true
-        wait $SERVER_PID 2>/dev/null || true
+        python3 test_basic.py
+    
+    - name: Run advanced tests
+      run: |
+        python3 test_advanced.py
 
   test-matrix:
     runs-on: ${{ matrix.os }}
@@ -63,12 +58,28 @@ jobs:
       run: |
         brew install cmake netcat
     
+    - name: Install vcpkg (Ubuntu)
+      if: matrix.os == 'ubuntu-latest'
+      run: |
+        git clone https://github.com/Microsoft/vcpkg.git
+        ./vcpkg/bootstrap-vcpkg.sh
+        export VCPKG_ROOT=$(pwd)/vcpkg
+        echo "VCPKG_ROOT=$(pwd)/vcpkg" >> $GITHUB_ENV
+    
+    - name: Install vcpkg (macOS)
+      if: matrix.os == 'macos-latest'
+      run: |
+        git clone https://github.com/Microsoft/vcpkg.git
+        ./vcpkg/bootstrap-vcpkg.sh
+        export VCPKG_ROOT=$(pwd)/vcpkg
+        echo "VCPKG_ROOT=$(pwd)/vcpkg" >> $GITHUB_ENV
+    
     - name: Build project
       run: |
-        make clean || true
-        make
+        cmake -B build -S . -DCMAKE_TOOLCHAIN_FILE=$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake
+        cmake --build ./build
     
     - name: Verify build artifacts
       run: |
-        ls -la server
-        file server
+        ls -la build/server
+        file build/server
